@@ -2,18 +2,42 @@
 
 namespace App\Console\Commands;
 
+use App\Imports\AchatsImport;
+use App\Services\VenteStockService;
+use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Maatwebsite\Excel\Facades\Excel;
-use Carbon\Carbon;
-use App\Imports\AchatsImport;
-use App\Models\ImportedFile;
 
+/**
+ * ImportAchatsAuto
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Importe automatiquement les fichiers Excel/CSV du dossier surveillé.
+ * Traite uniquement les fichiers dont la date de modification = hier.
+ *
+ * UTILISATION :
+ *   php artisan import:achat-auto
+ *   php artisan import:achat-auto --date=2026-03-11   (date manuelle)
+ *   php artisan import:achat-auto --all               (tous les fichiers sans filtre de date)
+ *
+ * AUTOMATISER (tâche planifiée) :
+ *   Ajouter dans routes/console.php :
+ *   Schedule::command('import:achat-auto')->dailyAt('06:00');
+ *
+ * DOSSIER SURVEILLÉ (configurable dans .env) :
+ *   ACHATS_WATCH_FOLDER=D:\Stage\Achat
+ *   → Sous-dossier calculé : ACHAT {année}\{MOIS} {année}
+ *   → Exemple : D:\Stage\Achat\ACHAT 2026\MARS 2026
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 class ImportAchatsAuto extends Command
 {
-    protected $signature   = 'import:achats-auto';
-    protected $description = 'Import automatique des achats fournisseurs (fichiers modifiés hier)';
+    protected $signature = 'import:achat-auto
+                            {--date= : Date spécifique (format Y-m-d). Par défaut = hier.}
+                            {--all   : Importer tous les fichiers sans filtre de date.}';
+
+    protected $description = 'Importe automatiquement les achats Excel/CSV du dossier surveillé (fichiers modifiés hier)';
 
     private const MOIS = [
         1  => 'JANVIER',
@@ -30,106 +54,131 @@ class ImportAchatsAuto extends Command
         12 => 'DECEMBRE',
     ];
 
+    public function __construct(private VenteStockService $stockService)
+    {
+        parent::__construct();
+    }
+
     public function handle(): int
     {
-        $yesterday   = Carbon::yesterday();
-        $year        = $yesterday->year;
-        $monthName   = self::MOIS[$yesterday->month];
-        $importDate  = $yesterday->format('Y-m-d');
+        $watchFolder = rtrim(env('ACHATS_WATCH_FOLDER', storage_path('app/achats_auto')), '/\\');
 
-        // ── Chemin depuis .env ────────────────────────────────────────────────
-        // ACHATS_WATCH_FOLDER="D:\Stage\Achat"
-        // → construit : D:\Stage\Achat\ACHAT 2026\MARS 2026
-        $base     = rtrim(env('ACHATS_WATCH_FOLDER', storage_path('app/achats_auto')), '/\\');
-        $basePath = $base . DIRECTORY_SEPARATOR . "ACHAT {$year}" . DIRECTORY_SEPARATOR . "{$monthName} {$year}";
-
-        $this->info("📂 Dossier ciblé : $basePath");
-
-        if (!File::exists($basePath)) {
-            $this->error("❌ Dossier introuvable : $basePath");
-            $this->line("   → Vérifiez ACHATS_WATCH_FOLDER dans .env");
-            Log::error("ImportAchatsAuto — Dossier introuvable : $basePath");
-            return self::FAILURE;
+        // Date de référence
+        if ($this->option('date')) {
+            $refDate = Carbon::parse($this->option('date'));
+        } else {
+            $refDate = Carbon::yesterday();
         }
 
-        // Créer ARCHIVE si nécessaire
-        $archivePath = $basePath . DIRECTORY_SEPARATOR . 'ARCHIVE';
-        if (!File::exists($archivePath)) {
-            File::makeDirectory($archivePath, 0755, true);
-            $this->info("📁 Dossier ARCHIVE créé.");
+        $monthFolder = $watchFolder
+            . DIRECTORY_SEPARATOR . 'ACHAT ' . $refDate->year
+            . DIRECTORY_SEPARATOR . self::MOIS[$refDate->month] . ' ' . $refDate->year;
+
+        $this->info("📁 Dossier : {$monthFolder}");
+
+        if (!File::exists($monthFolder)) {
+            $this->error("Dossier introuvable : {$monthFolder}");
+            $this->line("Vérifiez ACHATS_WATCH_FOLDER dans .env");
+            return Command::FAILURE;
         }
 
-        $files = File::files($basePath);
-        $this->info("📋 Fichiers trouvés : " . count($files));
+        // Dossier ARCHIVE
+        $archiveFolder = $monthFolder . DIRECTORY_SEPARATOR . 'ARCHIVE';
+        if (!File::exists($archiveFolder)) {
+            File::makeDirectory($archiveFolder, 0755, true);
+        }
 
-        $totalImported  = 0;
-        $totalSkipped   = 0;
-        $filesProcessed = 0;
+        // Lister les fichiers Excel/CSV
+        $allFiles = collect(File::files($monthFolder))
+            ->filter(fn($f) => in_array(strtolower($f->getExtension()), ['xlsx', 'xls', 'csv']));
 
-        foreach ($files as $file) {
+        if ($allFiles->isEmpty()) {
+            $this->warn("Aucun fichier Excel/CSV dans : {$monthFolder}");
+            return Command::SUCCESS;
+        }
 
-            // Excel uniquement
-            if (!in_array(strtolower($file->getExtension()), ['xlsx', 'xls', 'csv'])) {
-                $this->line("  ⏭  Ignoré (non Excel/CSV) : " . $file->getFilename());
-                continue;
-            }
+        $this->info("🔍 {$allFiles->count()} fichier(s) trouvé(s).");
 
+        $totalNew   = 0;
+        $totalSkip  = 0;
+        $processed  = [];
+        $ignored    = [];
+        $errors     = [];
+        $mouvements = [];
+        $importAll  = $this->option('all');
+
+        foreach ($allFiles as $file) {
             $filename = $file->getFilename();
             $realPath = $file->getRealPath();
+            $mtime    = Carbon::createFromTimestamp($file->getMTime());
 
-            // ── Filtre clé : date de modification = hier ──────────────────────
-            $fileDate   = Carbon::createFromTimestamp($file->getMTime())->toDateString();
-            $targetDate = $yesterday->toDateString();
-
-            if ($fileDate !== $targetDate) {
-                $this->line("  ⏭  Ignoré (modifié le $fileDate ≠ hier $targetDate) : $filename");
+            // Filtre date de modification (sauf si --all)
+            if (!$importAll && !$mtime->isSameDay($refDate)) {
+                $ignored[] = $filename;
+                $this->line("  ⏭  Ignoré (date ≠ {$refDate->format('d/m/Y')}) : {$filename}");
                 continue;
             }
 
-            // ── Statut du fichier (sans ImportedRow) ───────────────────────────
-            $existingRecord = ImportedFile::where('filename', $filename)->first();
-            if ($existingRecord) {
-                $this->info("  🔄 Fichier connu ({$existingRecord->total_rows} ligne(s) déjà importées), scan des nouvelles lignes : $filename");
-            } else {
-                $this->info("  🆕 Nouveau fichier, import complet : $filename");
-            }
+            $importDate = $mtime->format('Y-m-d');
 
-            // ── Import ─────────────────────────────────────────────────────────
+            $this->line("  📄 Traitement : {$filename} (date achat : {$importDate})");
+
             try {
                 $importer = new AchatsImport($filename, $realPath, $importDate);
                 Excel::import($importer, $realPath);
 
-                $newRows     = $importer->getNewRowsCount();
-                $skippedRows = $importer->getSkippedRowsCount();
+                $new  = $importer->getNewRowsCount();
+                $skip = $importer->getSkippedRowsCount();
 
-                $totalImported += $newRows;
-                $totalSkipped  += $skippedRows;
+                $totalNew  += $new;
+                $totalSkip += $skip;
+                $processed[] = $filename;
 
-                $this->info("  ✅ $filename → $newRows insérée(s), $skippedRows ignorée(s).");
+                $this->line("     ✅ {$new} ligne(s) insérée(s), {$skip} doublon(s) ignoré(s).");
 
-                // Archiver avec préfixe date pour éviter les conflits
-                $dest = $archivePath . DIRECTORY_SEPARATOR . $yesterday->format('Ymd') . '_' . $filename;
+                foreach ($importer->getInsertedRows() as $row) {
+                    $mouvements[] = [
+                        'code'     => $row['Code'],
+                        'quantite' => (float) $row['QuantiteAchat'],
+                        'prixU'    => (float) $row['PrixU'],
+                        'date'     => $importDate,
+                    ];
+                }
+
+                // Archiver le fichier
+                $dest = $archiveFolder . DIRECTORY_SEPARATOR . $mtime->format('Ymd') . '_' . $filename;
                 File::copy($realPath, $dest);
-                $this->info("  📁 Archivé : $dest");
-
-                $filesProcessed++;
             } catch (\Throwable $e) {
-                $this->error("  ❌ Erreur : $filename");
-                $this->error("     " . $e->getMessage());
-                Log::error("ImportAchatsAuto — Erreur import", [
-                    'file'    => $filename,
-                    'message' => $e->getMessage(),
-                    'trace'   => $e->getTraceAsString(),
-                ]);
+                $errors[] = $filename . ' : ' . $e->getMessage();
+                $this->error("     ❌ Erreur : {$e->getMessage()}");
+                Log::error('import:achat-auto', ['file' => $filename, 'message' => $e->getMessage()]);
             }
         }
 
-        $this->info("──────────────────────────────────────────────────");
-        $this->info("✔  Import terminé.");
-        $this->info("   Fichiers traités  : $filesProcessed");
-        $this->info("   Lignes insérées   : $totalImported");
-        $this->info("   Lignes ignorées   : $totalSkipped");
+        // Mettre à jour le stock immédiatement après l'import
+        if (!empty($mouvements)) {
+            $this->line('');
+            $this->info("⚙  Mise à jour du stock ({$totalNew} mouvement(s))…");
+            $this->stockService->ajusterStockBulkAvecPrix($mouvements);
+            $this->info("✅ Stock mis à jour.");
+        }
 
-        return self::SUCCESS;
+        // Résumé
+        $this->line('');
+        $this->info("─────────────────────────────────────");
+        $this->info("📊 Résumé :");
+        $this->line("   Fichiers traités  : " . count($processed));
+        $this->line("   Fichiers ignorés  : " . count($ignored));
+        $this->line("   Lignes insérées   : {$totalNew}");
+        $this->line("   Doublons ignorés  : {$totalSkip}");
+        if (!empty($errors)) {
+            $this->error("   Erreurs           : " . count($errors));
+            foreach ($errors as $err) {
+                $this->error("   → {$err}");
+            }
+        }
+        $this->info("─────────────────────────────────────");
+
+        return empty($errors) ? Command::SUCCESS : Command::FAILURE;
     }
 }

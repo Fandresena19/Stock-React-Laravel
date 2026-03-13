@@ -91,6 +91,8 @@ class AchatController extends Controller
 
     // =========================================================================
     // IMPORT MANUEL
+    // La date peut être saisie manuellement (si import en retard)
+    // Par défaut = hier
     // =========================================================================
 
     public function import(Request $request)
@@ -130,7 +132,7 @@ class AchatController extends Controller
             }
         }
 
-        // 1 seul UPDATE CASE WHEN pour tous les articles importés
+        // Mettre à jour le stock immédiatement (sans attendre le job)
         if (!empty($mouvements)) {
             $this->stockService->ajusterStockBulkAvecPrix($mouvements);
         }
@@ -142,7 +144,8 @@ class AchatController extends Controller
     }
 
     // =========================================================================
-    // IMPORT AUTOMATIQUE
+    // IMPORT AUTOMATIQUE — fichiers modifiés HIER dans le dossier surveillé
+    // Commande : php artisan import:achat-auto
     // =========================================================================
 
     public function importAuto(Request $request)
@@ -231,20 +234,24 @@ class AchatController extends Controller
     }
 
     // =========================================================================
-    // DELETE
+    // DELETE — diminue le stock AVANT de supprimer
     // =========================================================================
 
     public function destroy($id)
     {
         $achat = Achat::findOrFail($id);
 
-        // Diminuer le stock AVANT delete (données encore disponibles)
+        // Annuler l'effet de cet achat sur le stock
         $this->stockService->ajusterStockVente(
             code: $achat->Code,
             quantite: (float) $achat->QuantiteAchat,
         );
 
         $achat->delete();
+
+        // Invalider le cache pour forcer une resync complète
+        cache()->forget('sync_done');
+        cache()->forget('vente_count_' . 'servmcljournal' . now()->format('Ymd'));
 
         return back()->with('success', 'Ligne supprimée.');
     }

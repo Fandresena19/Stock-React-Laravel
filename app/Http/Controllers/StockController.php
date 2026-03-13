@@ -7,35 +7,16 @@ use App\Models\Stocks;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 
-/**
- * StockController
- * ─────────────────────────────────────────────────────────────────────────────
- * index() fait deux choses :
- *   1. Dispatche SyncStockJob dans la queue → calculs en arrière-plan
- *   2. Retourne immédiatement les données actuelles de la table stocks
- *
- * L'utilisateur voit sa page INSTANTANÉMENT.
- * Le worker traite le job en parallèle et met stocks à jour.
- * Au prochain rechargement, les données sont fraîches.
- *
- * COLONNES RÉELLES EN BASE (Windows Server, casse exacte) :
- *   Code, Liblong, fournisseur, QuantiteStock, PrixU, PrixTotal
- * ─────────────────────────────────────────────────────────────────────────────
- */
 class StockController extends Controller
 {
     // =========================================================================
-    // PAGE PRINCIPALE
+    // PAGE PRINCIPALE — dispatch job en arrière-plan + lecture seule
     // =========================================================================
 
     public function index(Request $request)
     {
-        // ── 1. Dispatcher le job si le cache est expiré ───────────────────────
-        // dispatch() place le job dans la table jobs et retourne immédiatement.
-        // Le worker (php artisan queue:work) le récupère et l'exécute en parallèle.
         $this->dispatchSyncSiNecessaire();
 
-        // ── 2. Lire les stocks actuels (simple SELECT) ────────────────────────
         $search      = $request->input('search', '');
         $fournisseur = $request->input('fournisseur', '');
         $maxQte      = $request->input('max_qte', '');
@@ -48,20 +29,12 @@ class StockController extends Controller
         $stocks = Stocks::when(
             $search,
             fn($q) =>
-            $q->where('Code',        'like', "%{$search}%")
-                ->orWhere('Liblong',   'like', "%{$search}%")
+            $q->where('Code',          'like', "%{$search}%")
+                ->orWhere('Liblong',     'like', "%{$search}%")
                 ->orWhere('fournisseur', 'like', "%{$search}%")
         )
-            ->when(
-                $fournisseur,
-                fn($q) =>
-                $q->where('fournisseur', $fournisseur)
-            )
-            ->when(
-                $maxQte !== '',
-                fn($q) =>
-                $q->where('QuantiteStock', '<', (float) $maxQte)
-            )
+            ->when($fournisseur, fn($q) => $q->where('fournisseur', $fournisseur))
+            ->when($maxQte !== '', fn($q) => $q->where('QuantiteStock', '<', (float) $maxQte))
             ->orderBy('Code')
             ->paginate(20)
             ->withQueryString();
@@ -78,13 +51,13 @@ class StockController extends Controller
             'fournisseursList' => $fournisseursList,
             'stats'            => $stats,
             'filters'          => compact('search', 'fournisseur') + ['max_qte' => $maxQte],
-            // Indique au frontend si une sync est en cours
-            'sync_en_cours'    => !$this->toutEstAJour(),
+            'sync_en_cours'    => !cache()->get('sync_done'),
         ]);
     }
 
     // =========================================================================
-    // UPDATE QUANTITÉ inline (correction manuelle)
+    // UPDATE QUANTITÉ inline — correction manuelle
+    // Colonnes exactes en base Windows : Code, QuantiteStock, PrixU, PrixTotal
     // =========================================================================
 
     public function update(Request $request)
@@ -94,10 +67,17 @@ class StockController extends Controller
             'quantite' => 'required|numeric|min:0',
         ]);
 
-        $stock = Stocks::where('Code', $request->Code)->firstOrFail();
+        $stock = Stocks::where('Code', $request->input('Code'))->first();
+
+        if (!$stock) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Article introuvable.',
+            ], 404);
+        }
 
         $prixU    = (float) ($stock->PrixU ?? 0);
-        $quantite = (float) $request->quantite;
+        $quantite = (float) $request->input('quantite');
 
         $stock->update([
             'QuantiteStock' => $quantite,
@@ -112,35 +92,17 @@ class StockController extends Controller
     }
 
     // =========================================================================
-    // PRIVÉ
+    // PRIVÉ — anti-boucle : dispatch seulement si cache expiré ET pas déjà en queue
     // =========================================================================
 
     private function dispatchSyncSiNecessaire(): void
     {
-        $articlesOk = (bool) cache()->get('sync_articles_ok');
-        $ventesOk   = (bool) cache()->get('sync_ventes_ok');
-        $prixUOk    = (bool) cache()->get('sync_prixu_ok');
-
-        if ($articlesOk && $ventesOk && $prixUOk) return;
-
-        // Vérifier qu'un job identique n'est pas déjà en attente
-        // (évite d'empiler des dizaines de jobs si l'utilisateur recharge)
+        if (cache()->get('sync_done'))           return;
         if (cache()->get('sync_job_dispatched')) return;
 
-        SyncStockJob::dispatch(
-            syncArticles: !$articlesOk,
-            syncVentes: !$ventesOk,
-            syncPrixU: !$prixUOk,
-        )->onQueue('stock');
+        SyncStockJob::dispatch()->onQueue('stock');
 
-        // Bloquer un nouveau dispatch pendant 30 secondes
-        cache()->put('sync_job_dispatched', true, now()->addSeconds(30));
-    }
-
-    private function toutEstAJour(): bool
-    {
-        return (bool) cache()->get('sync_articles_ok')
-            && (bool) cache()->get('sync_ventes_ok')
-            && (bool) cache()->get('sync_prixu_ok');
+        // Bloquer un nouveau dispatch pendant 35 min (durée max du job)
+        cache()->put('sync_job_dispatched', true, now()->addMinutes(35));
     }
 }

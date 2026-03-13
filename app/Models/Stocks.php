@@ -7,12 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 class Stocks extends Model
 {
     protected $table      = 'stocks';
-    protected $primaryKey = 'Code';       // Majuscule exacte comme en base
+    protected $primaryKey = 'Code';
     public    $incrementing = false;
     protected $keyType    = 'string';
     public    $timestamps = false;
 
-    // Noms EXACTS des colonnes MySQL (Windows Server = sensible à la casse)
+    // Noms EXACTS des colonnes MySQL (sensible à la casse sur Windows Server)
     protected $fillable = [
         'Code',
         'Liblong',
@@ -28,13 +28,11 @@ class Stocks extends Model
         'PrixTotal'     => 'float',
     ];
 
-    // ── Scopes ────────────────────────────────────────────────────────────────
-
     public function scopeSearch($query, ?string $search)
     {
         if (!$search) return $query;
-        return $query->where('Code',        'like', "%{$search}%")
-            ->orWhere('Liblong',   'like', "%{$search}%")
+        return $query->where('Code',         'like', "%{$search}%")
+            ->orWhere('Liblong',    'like', "%{$search}%")
             ->orWhere('fournisseur', 'like', "%{$search}%");
     }
 

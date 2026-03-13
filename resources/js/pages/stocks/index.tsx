@@ -25,6 +25,7 @@ export default function Index({
     const [search, setSearch] = useState(filters?.search ?? '');
     const [fournisseur, setFournisseur] = useState(filters?.fournisseur ?? '');
     const [maxQte, setMaxQte] = useState(filters?.max_qte ?? '');
+
     const [editingCode, setEditingCode] = useState<string | null>(null);
     const [editQte, setEditQte] = useState<string>('');
     const [saving, setSaving] = useState(false);
@@ -54,9 +55,11 @@ export default function Index({
 
     const startEdit = (stock: any) => {
         setEditingCode(stock.Code);
+        // CORRIGÉ : QuantiteStock avec majuscule exacte
         setEditQte(String(n(stock.QuantiteStock)));
         setTimeout(() => inputRef.current?.focus(), 50);
     };
+
     const cancelEdit = () => {
         setEditingCode(null);
         setEditQte('');
@@ -182,127 +185,148 @@ export default function Index({
 
             {/* ── TABLEAU ───────────────────────────────────────────────────── */}
             <div className="mx-4 mb-4 overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-                <table className="w-full text-sm">
-                    <thead className="bg-gray-800 text-white">
-                        <tr className="tracking-wideuppercase border-b text-left text-xs font-semibold">
-                            <th className="px-4 py-3">Code</th>
-                            <th className="px-4 py-3">Libellé</th>
-                            <th className="px-4 py-3">Fournisseur</th>
-                            <th className="px-4 py-3 text-right">Quantité</th>
-                            <th className="px-4 py-3 text-right">Prix U.</th>
-                            <th className="px-4 py-3 text-right">Prix Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows.length > 0 ? (
-                            rows.map((stock: any) => {
-                                const isEditing = editingCode === stock.Code;
-                                const wasSaved = savedCode === stock.Code;
-                                const isRupture = n(stock.QuantiteStock) <= 0;
+                <div className="max-h-[430px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                        <thead className="sticky top-0 bg-gray-800 text-white">
+                            <tr>
+                                <th className="px-4 py-2 text-left">Code</th>
+                                <th className="px-4 py-2 text-left">Article</th>
+                                <th className="px-4 py-2 text-left">
+                                    Fournisseur
+                                </th>
+                                <th className="px-4 py-2 text-right">
+                                    Qté Stock
+                                </th>
+                                <th className="px-4 py-2 text-right">Prix U</th>
+                                <th className="px-4 py-2 text-right">
+                                    Prix Total
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody className="text-gray-700">
+                            {rows.length ? (
+                                rows.map((stock: any) => {
+                                    const isEditing =
+                                        editingCode === stock.Code;
+                                    const wasSaved = savedCode === stock.Code;
+                                    // CORRIGÉ : QuantiteStock avec majuscule exacte
+                                    const isRupture =
+                                        n(stock.QuantiteStock) <= 0;
 
-                                return (
-                                    <tr
-                                        key={stock.Code}
-                                        className={`border-b transition-colors last:border-none ${isRupture ? 'bg-red-50' : ''} ${wasSaved ? '!bg-green-50' : ''}`}
-                                    >
-                                        <td className="px-4 py-2 font-mono text-xs text-gray-500">
-                                            {stock.Code}
-                                        </td>
-                                        <td className="px-4 py-2 text-gray-500">
-                                            {stock.Liblong}
-                                        </td>
-                                        <td className="px-4 py-2 text-gray-600">
-                                            {stock.fournisseur ?? '—'}
-                                        </td>
+                                    return (
+                                        <tr
+                                            key={stock.Code}
+                                            className={`border-b transition-colors last:border-none ${isRupture ? 'bg-red-50' : ''} ${wasSaved ? '!bg-green-50' : ''}`}
+                                        >
+                                            <td className="px-4 py-2 font-mono text-xs text-gray-500">
+                                                {stock.Code}
+                                            </td>
+                                            <td className="px-4 py-2">
+                                                {stock.Liblong}
+                                            </td>
+                                            <td className="px-4 py-2 text-gray-500">
+                                                {stock.fournisseur ?? '—'}
+                                            </td>
 
-                                        {/* Quantité — éditable inline */}
-                                        <td className="px-4 py-2 text-right">
-                                            {isEditing ? (
-                                                <div className="flex items-center justify-end gap-1.5">
-                                                    <input
-                                                        ref={inputRef}
-                                                        type="number"
-                                                        min="0"
-                                                        value={editQte}
-                                                        onChange={(e) =>
-                                                            setEditQte(
-                                                                e.target.value,
-                                                            )
-                                                        }
-                                                        onKeyDown={(e) => {
-                                                            if (
-                                                                e.key ===
-                                                                'Enter'
-                                                            )
+                                            {/* Quantité — éditable inline au clic */}
+                                            <td className="px-4 py-2 text-right">
+                                                {isEditing ? (
+                                                    <div className="flex items-center justify-end gap-1.5">
+                                                        <input
+                                                            ref={inputRef}
+                                                            type="number"
+                                                            min="0"
+                                                            value={editQte}
+                                                            onChange={(e) =>
+                                                                setEditQte(
+                                                                    e.target
+                                                                        .value,
+                                                                )
+                                                            }
+                                                            onKeyDown={(e) => {
+                                                                if (
+                                                                    e.key ===
+                                                                    'Enter'
+                                                                )
+                                                                    saveEdit(
+                                                                        stock.Code,
+                                                                    );
+                                                                if (
+                                                                    e.key ===
+                                                                    'Escape'
+                                                                )
+                                                                    cancelEdit();
+                                                            }}
+                                                            className="w-24 rounded border border-blue-400 px-2 py-1 text-right text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
+                                                        />
+                                                        <button
+                                                            disabled={saving}
+                                                            onClick={() =>
                                                                 saveEdit(
                                                                     stock.Code,
-                                                                );
-                                                            if (
-                                                                e.key ===
-                                                                'Escape'
-                                                            )
-                                                                cancelEdit();
-                                                        }}
-                                                        className="w-24 rounded border border-blue-400 px-2 py-1 text-right text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
-                                                    />
-                                                    <button
-                                                        disabled={saving}
+                                                                )
+                                                            }
+                                                            className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+                                                        >
+                                                            ✓
+                                                        </button>
+                                                        <button
+                                                            onClick={cancelEdit}
+                                                            className="rounded bg-gray-200 px-2 py-1 text-xs hover:bg-gray-300"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <span
                                                         onClick={() =>
-                                                            saveEdit(stock.Code)
+                                                            startEdit(stock)
                                                         }
-                                                        className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+                                                        title="Cliquer pour modifier"
+                                                        className={`cursor-pointer rounded px-2 py-0.5 font-medium transition-colors hover:bg-blue-50 hover:text-blue-700 ${isRupture ? 'text-red-600' : 'text-gray-800'}`}
                                                     >
-                                                        ✓
-                                                    </button>
-                                                    <button
-                                                        onClick={cancelEdit}
-                                                        className="rounded bg-gray-200 px-2 py-1 text-xs hover:bg-gray-300"
-                                                    >
-                                                        ✕
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                <span
-                                                    onClick={() =>
-                                                        startEdit(stock)
-                                                    }
-                                                    title="Cliquer pour modifier"
-                                                    className={`cursor-pointer rounded px-2 py-0.5 font-medium transition-colors hover:bg-blue-50 hover:text-blue-700 ${isRupture ? 'text-red-600' : 'text-gray-800'}`}
-                                                >
-                                                    {n(
-                                                        stock.QuantiteStock,
-                                                    ).toLocaleString('fr-FR')}
-                                                </span>
-                                            )}
-                                        </td>
+                                                        {/* CORRIGÉ : QuantiteStock */}
+                                                        {n(
+                                                            stock.QuantiteStock,
+                                                        ).toLocaleString(
+                                                            'fr-FR',
+                                                        )}
+                                                    </span>
+                                                )}
+                                            </td>
 
-                                        <td className="px-4 py-2 text-right text-gray-600">
-                                            {n(stock.PrixU).toLocaleString(
-                                                'fr-FR',
-                                                { minimumFractionDigits: 2 },
-                                            )}
-                                        </td>
-                                        <td className="px-4 py-2 text-right font-semibold text-gray-800">
-                                            {n(stock.PrixTotal).toLocaleString(
-                                                'fr-FR',
-                                                { minimumFractionDigits: 2 },
-                                            )}
-                                        </td>
-                                    </tr>
-                                );
-                            })
-                        ) : (
-                            <tr>
-                                <td
-                                    colSpan={6}
-                                    className="px-4 py-6 text-center text-gray-400"
-                                >
-                                    Aucun article trouvé
-                                </td>
-                            </tr>
-                        )}
-                    </tbody>
-                </table>
+                                            {/* CORRIGÉ : PrixU et PrixTotal */}
+                                            <td className="px-4 py-2 text-right text-gray-600">
+                                                {n(stock.PrixU).toLocaleString(
+                                                    'fr-FR',
+                                                    {
+                                                        minimumFractionDigits: 2,
+                                                    },
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                                                {n(
+                                                    stock.PrixTotal,
+                                                ).toLocaleString('fr-FR', {
+                                                    minimumFractionDigits: 2,
+                                                })}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            ) : (
+                                <tr>
+                                    <td
+                                        colSpan={6}
+                                        className="px-4 py-6 text-center text-gray-400"
+                                    >
+                                        Aucun article trouvé
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             {/* ── PAGINATION ────────────────────────────────────────────────── */}

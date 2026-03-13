@@ -7,6 +7,7 @@ use App\Models\Stocks;
 
 class ArticleObserver
 {
+    // Nouvel article → créer ligne dans stocks avec quantité 0
     public function created(Article $article): void
     {
         Stocks::firstOrCreate(
@@ -21,6 +22,7 @@ class ArticleObserver
         );
     }
 
+    // Article modifié → sync Liblong + fournisseur dans stocks
     public function updated(Article $article): void
     {
         Stocks::where('Code', $article->Code)->update([
@@ -31,8 +33,8 @@ class ArticleObserver
 
     public function deleted(Article $article): void
     {
-        // Conserver le stock pour l'historique.
-        // Décommenter pour supprimer aussi :
+        // Conserver le stock pour l'historique
+        // Décommenter pour supprimer :
         // Stocks::where('Code', $article->Code)->delete();
     }
 }

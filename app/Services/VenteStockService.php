@@ -7,76 +7,32 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * VenteStockService
- * ─────────────────────────────────────────────────────────────────────────────
- * Mouvements immédiats (pas de job, pas de délai) :
- *   - Import Excel     → ajusterStockBulkAvecPrix()  (appelé par AchatController)
- *   - Suppression achat → ajusterStockVente()         (appelé par AchatController)
- *   - Achat unitaire   → ajusterStockAchat()          (appelé par AchatObserver si Eloquent)
- *
- * Chaque méthode fait 1 seul UPDATE ciblé sur la/les ligne(s) concernée(s).
- * ─────────────────────────────────────────────────────────────────────────────
+ * Mouvements IMMÉDIATS (pas de job, instantané) :
+ *   - Import Excel      → ajusterStockBulkAvecPrix()
+ *   - Suppression achat → ajusterStockVente()
  */
 class VenteStockService
 {
-    // =========================================================================
-    // VENTE — diminuer le stock (1 UPDATE)
-    // =========================================================================
-
+    // Diminuer le stock (suppression achat)
     public function ajusterStockVente(string $code, float $quantite): void
     {
         $this->ajuster($code, $quantite, '-');
     }
 
-    // =========================================================================
-    // ANNULATION VENTE — remettre en stock
-    // =========================================================================
-
+    // Augmenter le stock (annulation vente)
     public function annulerVente(string $code, float $quantite): void
     {
         $this->ajuster($code, $quantite, '+');
     }
 
-    // =========================================================================
-    // ACHAT UNITAIRE — augmenter stock + màj PrixU si plus récent
-    // =========================================================================
-
-    public function ajusterStockAchat(
-        string $code,
-        float  $quantite,
-        float  $nouveauPrixU,
-        string $dateAchat
-    ): void {
-        $derniereDateEnBase = DB::table('achats')
-            ->where('Code', $code)
-            ->max('date');
-
-        if ($derniereDateEnBase === null || $dateAchat >= $derniereDateEnBase) {
-            DB::table('stocks')
-                ->where('Code', $code)
-                ->update([
-                    'QuantiteStock' => DB::raw("QuantiteStock + {$quantite}"),
-                    'PrixU'         => $nouveauPrixU,
-                    'PrixTotal'     => DB::raw("(QuantiteStock + {$quantite}) * {$nouveauPrixU}"),
-                ]);
-        } else {
-            $this->ajuster($code, $quantite, '+');
-        }
-    }
-
-    // =========================================================================
-    // BULK ACHATS avec prix (import Excel)
-    // Un seul UPDATE CASE WHEN pour tous les articles → ~5ms pour 500 articles
-    //
-    // @param array $mouvements [
-    //   ['code' => 'ART01', 'quantite' => 5.0, 'prixU' => 150.0, 'date' => '2026-03-12'],
-    // ]
-    // =========================================================================
-
+    /**
+     * Bulk import Excel — 1 seul UPDATE CASE WHEN pour tous les articles
+     * @param array $mouvements [['code'=>'X','quantite'=>5.0,'prixU'=>150.0,'date'=>'2026-03-12'],...]
+     */
     public function ajusterStockBulkAvecPrix(array $mouvements): void
     {
         if (empty($mouvements)) return;
 
-        // Grouper par code, sommer quantités, garder PrixU du plus récent
         $totaux = [];
         foreach ($mouvements as $m) {
             $code = $m['code'];
@@ -107,23 +63,17 @@ class VenteStockService
                 $codes[]    = $q;
             }
 
-            $in = implode(',', $codes);
-            DB::statement("
+            DB::statement('
                 UPDATE stocks
-                SET QuantiteStock = {$qteCase} END,
-                    PrixU         = {$prixCase} END,
-                    PrixTotal     = {$totalCase} END
-                WHERE `Code` IN ({$in})
-            ");
+                SET QuantiteStock = ' . $qteCase . ' END,
+                    PrixU         = ' . $prixCase . ' END,
+                    PrixTotal     = ' . $totalCase . ' END
+                WHERE `Code` IN (' . implode(',', $codes) . ')
+            ');
         }
 
-        // Invalider le cache PrixU pour que le prochain job le rafraîchisse
-        cache()->forget('sync_prixu_ok');
+        cache()->forget('sync_done');
     }
-
-    // =========================================================================
-    // PRIVÉ — 1 UPDATE ciblé sur 1 ligne
-    // =========================================================================
 
     private function ajuster(string $code, float $quantite, string $op): void
     {

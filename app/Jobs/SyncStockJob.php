@@ -13,52 +13,41 @@ use Illuminate\Support\Facades\Log;
 /**
  * SyncStockJob
  * ─────────────────────────────────────────────────────────────────────────────
- * Ce job est dispatché quand l'utilisateur visite /stocks.
- * Il tourne dans un worker séparé (php artisan queue:work).
- * L'utilisateur voit sa page immédiatement — le calcul se fait en parallèle.
- *
- * QUEUE : database (zéro dépendance, fonctionne partout)
- *
- * DÉMARRER LE WORKER (une seule fois, dans un terminal séparé) :
+ * Lancé en arrière-plan via :
  *   php artisan queue:work --queue=stock --sleep=3 --tries=3
  *
- * CE QUE LE JOB FAIT :
- *   1. syncArticlesManquants()  → INSERT articles absents de stocks
- *   2. syncVentesStock()        → recalcule achats - ventes (tables modifiées seulement)
- *   3. syncPrixU()              → met à jour PrixU depuis le dernier achat
+ * Déclenché automatiquement à chaque visite de /stocks (si cache expiré).
+ *
+ * Ce que le job fait :
+ *   1. syncArticlesManquants() — INSERT articles absents de stocks
+ *   2. syncVentesStock()       — QuantiteStock = SUM(achats) - SUM(ventes)
+ *   3. syncPrixU()             — PrixU = dernier prix d'achat par article
  * ─────────────────────────────────────────────────────────────────────────────
  */
 class SyncStockJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries   = 3;
-    public int $timeout = 300; // 5 minutes max pour 200+ tables
-
-    public function __construct(
-        public readonly bool $syncArticles = true,
-        public readonly bool $syncVentes   = true,
-        public readonly bool $syncPrixU    = true,
-    ) {}
+    public int $tries   = 1;
+    public int $timeout = 3600;
 
     public function handle(): void
     {
-        Log::info('SyncStockJob: démarrage', [
-            'articles' => $this->syncArticles,
-            'ventes'   => $this->syncVentes,
-            'prixU'    => $this->syncPrixU,
-        ]);
+        Log::info('SyncStockJob: démarrage');
 
-        if ($this->syncArticles) $this->syncArticlesManquants();
-        if ($this->syncVentes)   $this->syncVentesStock();
-        if ($this->syncPrixU)    $this->syncPrixUDepuisAchats();
+        $this->syncArticlesManquants();
+        $this->syncVentesStock();
+        $this->syncPrixU();
+
+        // Valide pendant 6h — évite de relancer le job à chaque visite
+        cache()->put('sync_done', true, now()->addHours(6));
+        cache()->forget('sync_job_dispatched');
 
         Log::info('SyncStockJob: terminé.');
     }
 
     // =========================================================================
-    // 1. Articles présents dans articles mais absents de stocks
-    //    + sync Liblong/fournisseur
+    // 1. Insérer les articles manquants dans stocks
     // =========================================================================
 
     private function syncArticlesManquants(): void
@@ -83,26 +72,25 @@ class SyncStockJob implements ShouldQueue
                         ])->toArray()
                     );
                 }
-                Log::info('SyncStockJob: ' . $missing->count() . ' article(s) insérés dans stocks.');
+                Log::info('SyncStockJob: ' . $missing->count() . ' article(s) insérés.');
             }
 
-            // Sync Liblong + fournisseur en 1 requête bulk
+            // Sync Liblong + fournisseur depuis articles
             DB::statement('
                 UPDATE stocks s
-                INNER JOIN articles a ON s.Code = a.Code
+                INNER JOIN articles a ON s.Code COLLATE utf8mb3_unicode_ci = a.Code COLLATE utf8mb3_unicode_ci
                 SET s.Liblong     = a.Liblong,
                     s.fournisseur = a.fournisseur
             ');
-
-            cache()->put('sync_articles_ok', true, now()->addMinutes(5));
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncArticles: ' . $e->getMessage());
         }
     }
 
     // =========================================================================
-    // 2. Ventes depuis les 200+ tables servmcljournal*
-    //    Traite UNIQUEMENT les tables dont UPDATE_TIME a changé → performant
+    // 2. QuantiteStock = SUM(achats) - SUM(ventes)
+    //    Utilise COUNT(*) par table comme signature de changement
+    //    (UPDATE_TIME = NULL sous WAMP/Windows — non fiable)
     // =========================================================================
 
     private function syncVentesStock(): void
@@ -110,38 +98,48 @@ class SyncStockJob implements ShouldQueue
         try {
             $database = DB::getDatabaseName();
 
-            $venteTables = DB::select('
-                SELECT t.TABLE_NAME, t.UPDATE_TIME
+            // Lister toutes les tables servmcljournal* avec colonnes idcint + E1
+            $venteTables = DB::select("
+                SELECT t.TABLE_NAME
                 FROM INFORMATION_SCHEMA.TABLES t
                 WHERE t.TABLE_SCHEMA = ?
-                  AND t.TABLE_NAME LIKE \'servmcljournal%\'
+                  AND t.TABLE_NAME LIKE 'servmcljournal%'
                   AND (
                       SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS c
                       WHERE c.TABLE_SCHEMA = t.TABLE_SCHEMA
                         AND c.TABLE_NAME   = t.TABLE_NAME
-                        AND c.COLUMN_NAME IN (\'idcint\', \'E1\')
+                        AND c.COLUMN_NAME IN ('idcint', 'E1')
                   ) = 2
                 ORDER BY t.TABLE_NAME DESC
-            ', [$database]);
+            ", [$database]);
 
             if (empty($venteTables)) {
-                cache()->put('sync_ventes_ok', true, now()->addMinutes(5));
+                Log::info('SyncStockJob::syncVentes: aucune table servmcljournal trouvée.');
                 return;
             }
 
-            // Seulement les tables dont le contenu a changé
-            $tablesModifiees = array_filter(
-                $venteTables,
-                fn($row) => cache()->get('vente_chk_' . $row->TABLE_NAME) !== (string) $row->UPDATE_TIME
-            );
+            // Détecter les tables modifiées via COUNT(*) — fiable sous WAMP
+            $tablesModifiees = [];
+            foreach ($venteTables as $row) {
+                try {
+                    $count    = DB::table($row->TABLE_NAME)->count();
+                    $cacheKey = 'vente_count_' . $row->TABLE_NAME;
+                    $cached   = cache()->get($cacheKey);
+
+                    if ($cached === null || (int) $cached !== $count) {
+                        $tablesModifiees[] = ['name' => $row->TABLE_NAME, 'count' => $count];
+                    }
+                } catch (\Throwable) {
+                    // Table inaccessible → ignorée
+                }
+            }
 
             if (empty($tablesModifiees)) {
                 Log::info('SyncStockJob::syncVentes: aucune table modifiée.');
-                cache()->put('sync_ventes_ok', true, now()->addMinutes(5));
                 return;
             }
 
-            Log::info('SyncStockJob::syncVentes: ' . count($tablesModifiees) . ' table(s) modifiée(s) sur ' . count($venteTables));
+            Log::info('SyncStockJob::syncVentes: ' . count($tablesModifiees) . '/' . count($venteTables) . ' table(s) modifiée(s).');
 
             // Agréger toutes les ventes (toutes les tables pour total cohérent)
             $ventesTotaux = [];
@@ -149,7 +147,8 @@ class SyncStockJob implements ShouldQueue
                 try {
                     $rows = DB::select("
                         SELECT idcint AS Code, COALESCE(SUM(E1), 0) AS total_vente
-                        FROM `{$row->TABLE_NAME}` GROUP BY idcint
+                        FROM `{$row->TABLE_NAME}`
+                        GROUP BY idcint
                     ");
                     foreach ($rows as $r) {
                         $ventesTotaux[$r->Code] = ($ventesTotaux[$r->Code] ?? 0.0) + (float) $r->total_vente;
@@ -159,14 +158,14 @@ class SyncStockJob implements ShouldQueue
                 }
             }
 
-            // Totaux achats
+            // Totaux achats par Code
             $achats = DB::table('achats')
                 ->selectRaw('Code, COALESCE(SUM(QuantiteAchat), 0) AS total_achat')
                 ->groupBy('Code')
                 ->get()
                 ->keyBy('Code');
 
-            // Bulk UPDATE par chunks de 500
+            // Bulk UPDATE par chunks de 500 — CASE WHEN pour éviter N requêtes
             $stocks = DB::table('stocks')->select('Code', 'PrixU')->get();
 
             foreach ($stocks->chunk(500) as $chunk) {
@@ -196,22 +195,22 @@ class SyncStockJob implements ShouldQueue
                 ');
             }
 
-            // Marquer les tables modifiées comme traitées
-            foreach ($tablesModifiees as $row) {
-                cache()->put('vente_chk_' . $row->TABLE_NAME, (string) $row->UPDATE_TIME, now()->addDays(7));
+            // Mettre à jour le cache COUNT par table
+            foreach ($tablesModifiees as $table) {
+                cache()->put('vente_count_' . $table['name'], $table['count'], now()->addDays(30));
             }
 
-            cache()->put('sync_ventes_ok', true, now()->addMinutes(5));
+            Log::info('SyncStockJob::syncVentes: stocks mis à jour.');
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncVentes: ' . $e->getMessage());
         }
     }
 
     // =========================================================================
-    // 3. PrixU depuis le dernier achat par article
+    // 3. PrixU = prix du dernier achat par article
     // =========================================================================
 
-    private function syncPrixUDepuisAchats(): void
+    private function syncPrixU(): void
     {
         try {
             $derniersPrix = DB::table('achats as a')
@@ -220,10 +219,7 @@ class SyncStockJob implements ShouldQueue
                 ->get()
                 ->keyBy('Code');
 
-            if ($derniersPrix->isEmpty()) {
-                cache()->put('sync_prixu_ok', true, now()->addMinutes(5));
-                return;
-            }
+            if ($derniersPrix->isEmpty()) return;
 
             $quantites = DB::table('stocks')
                 ->whereIn('Code', $derniersPrix->keys()->toArray())
@@ -257,7 +253,7 @@ class SyncStockJob implements ShouldQueue
                 ');
             }
 
-            cache()->put('sync_prixu_ok', true, now()->addMinutes(5));
+            Log::info('SyncStockJob::syncPrixU: terminé.');
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncPrixU: ' . $e->getMessage());
         }
@@ -265,8 +261,8 @@ class SyncStockJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error('SyncStockJob: échec définitif', [
-            'message' => $exception->getMessage(),
-        ]);
+        cache()->forget('sync_job_dispatched');
+        cache()->forget('sync_done');
+        Log::error('SyncStockJob échoué: ' . $exception->getMessage());
     }
 }

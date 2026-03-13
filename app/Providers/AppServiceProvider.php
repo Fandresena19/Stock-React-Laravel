@@ -19,18 +19,12 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(VenteStockService::class);
     }
 
-    /**
-     * boot() = ZÉRO requête SQL, ZÉRO calcul.
-     * Les mises à jour stock passent par :
-     *   → SyncStockJob     (queue worker, déclenché depuis StockController)
-     *   → VenteStockService (UPDATE ciblé sur import/suppression achat)
-     *   → ArticleObserver   (INSERT/UPDATE ciblé sur article)
-     */
     public function boot(): void
     {
         Schema::defaultStringLength(191);
         $this->configureDefaults();
 
+        // Sync automatique articles → stocks lors de création/modification
         Article::observe(ArticleObserver::class);
     }
 
