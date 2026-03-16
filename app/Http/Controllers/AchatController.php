@@ -59,13 +59,14 @@ class AchatController extends Controller
             ->orderBy('date', 'desc')
             ->paginate(20)
             ->through(fn($a) => [
-                'id'            => $a->id,
+                'id'            => null, // pas d'id en base
                 'Code'          => $a->Code,
                 'Liblong'       => $a->Liblong,
                 'PrixU'         => $a->PrixU,
                 'QuantiteAchat' => $a->QuantiteAchat,
                 'montant'       => round($a->PrixU * $a->QuantiteAchat, 2),
                 'date'          => $a->date?->format('d/m/Y'),
+                'dateRaw'       => $a->date?->format('Y-m-d'), // pour la suppression
             ])
             ->withQueryString();
 
@@ -235,23 +236,50 @@ class AchatController extends Controller
 
     // =========================================================================
     // DELETE — diminue le stock AVANT de supprimer
+    // La table achats n'a pas de clé primaire — on utilise DB::table()
+    // et on identifie la ligne par Code + date + PrixU + QuantiteAchat
     // =========================================================================
 
-    public function destroy($id)
+    public function destroy(Request $request)
     {
-        $achat = Achat::findOrFail($id);
+        $request->validate([
+            'Code'          => 'required|string',
+            'date'          => 'required|string',
+            'PrixU'         => 'required|numeric',
+            'QuantiteAchat' => 'required|numeric',
+        ]);
+
+        $code          = $request->Code;
+        $date          = $request->date;
+        $prixU         = (float) $request->PrixU;
+        $quantiteAchat = (float) $request->QuantiteAchat;
+
+        // Vérifier que la ligne existe
+        $exists = \Illuminate\Support\Facades\DB::table('achats')
+            ->where('Code',          $code)
+            ->whereDate('date',      $date)
+            ->where('PrixU',         $prixU)
+            ->where('QuantiteAchat', $quantiteAchat)
+            ->exists();
+
+        if (!$exists) {
+            return back()->with('error', 'Ligne introuvable.');
+        }
 
         // Annuler l'effet de cet achat sur le stock
         $this->stockService->ajusterStockVente(
-            code: $achat->Code,
-            quantite: (float) $achat->QuantiteAchat,
+            code: $code,
+            quantite: $quantiteAchat,
         );
 
-        $achat->delete();
+        // Supprimer 1 seule ligne (LIMIT 1)
+        \Illuminate\Support\Facades\DB::statement('
+            DELETE FROM achats
+            WHERE Code = ? AND date = ? AND PrixU = ? AND QuantiteAchat = ?
+            LIMIT 1
+        ', [$code, $date, $prixU, $quantiteAchat]);
 
-        // Invalider le cache pour forcer une resync complète
         cache()->forget('sync_done');
-        cache()->forget('vente_count_' . 'servmcljournal' . now()->format('Ymd'));
 
         return back()->with('success', 'Ligne supprimée.');
     }

@@ -1,4 +1,5 @@
-import { Link } from '@inertiajs/react';
+import { usePage } from '@inertiajs/react';
+import { Link, router } from '@inertiajs/react';
 import {
     LayoutGrid,
     PackagePlus,
@@ -6,10 +7,11 @@ import {
     ShoppingBasket,
     UsersRound,
     Warehouse,
+    Sun,
+    Moon,
 } from 'lucide-react';
-import AppLogo from '@/components/app-logo';
+import AppLogoIcon from '@/components/app-logo-icon';
 import { NavFooter } from '@/components/nav-footer';
-import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
 import {
     Sidebar,
@@ -20,90 +22,142 @@ import {
     SidebarMenuButton,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
+import { useAppearance } from '@/hooks/use-appearance';
 import { dashboard } from '@/routes';
-import type { NavItem } from '@/types';
-
-// ─── Props ───────────────────────────────────────────────────────────────────
 
 interface AppSidebarProps {
     onVentesClick?: () => void;
 }
 
-// ─── Composant ───────────────────────────────────────────────────────────────
-
 export function AppSidebar({ onVentesClick }: AppSidebarProps) {
-    const mainNavItems: NavItem[] = [
-        {
-            title: 'Dashboard',
-            href: dashboard(),
-            icon: LayoutGrid,
-        },
-        {
-            title: 'Articles',
-            href: '/articles',
-            icon: ShoppingBasket,
-        },
-        {
-            title: 'Fournisseurs',
-            href: '/fournisseurs',
-            icon: UsersRound,
-        },
-        {
-            title: 'Achats',
-            href: '/achats',
-            icon: PackagePlus,
-        },
-        {
-            title: 'Stocks',
-            href: '/stocks',
-            icon: Warehouse,
-        },
+    const { url } = usePage();
+    const { appearance, updateAppearance } = useAppearance();
+
+    const isDark = appearance === 'dark';
+    const toggleTheme = () => updateAppearance(isDark ? 'light' : 'dark');
+
+    const navItems = [
+        { title: 'Dashboard', href: '/dashboard', icon: LayoutGrid },
+        { title: 'Articles', href: '/articles', icon: ShoppingBasket },
+        { title: 'Achats', href: '/achats', icon: PackagePlus },
+        { title: 'Ventes', href: '/ventes', icon: Receipt, modal: true },
+        { title: 'Stocks', href: '/stocks', icon: Warehouse },
+        { title: 'Fournisseurs', href: '/fournisseurs', icon: UsersRound },
     ];
 
+    const isActive = (href: string) =>
+        url === href || url.startsWith(href + '/');
+
     return (
-        <Sidebar collapsible="icon" variant="inset">
-            <SidebarHeader>
+        <Sidebar
+            collapsible="icon"
+            variant="inset"
+            className="border-r-0 bg-gray-950 dark:bg-gray-950"
+        >
+            {/* ── LOGO ── */}
+            <SidebarHeader className="bg-gray-950 px-4 py-5">
                 <SidebarMenu>
                     <SidebarMenuItem>
                         <SidebarMenuButton size="lg" asChild>
-                            <Link href={dashboard()} prefetch>
-                                <AppLogo />
+                            <Link
+                                href={dashboard().url}
+                                prefetch
+                                className="flex items-center gap-3"
+                            >
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#7a1a2e]">
+                                    <Warehouse
+                                        size={16}
+                                        className="text-white"
+                                    />
+                                </div>
+                                <span className="text-sm font-bold tracking-wide text-white">
+                                    Gestion de stocks
+                                </span>
                             </Link>
                         </SidebarMenuButton>
                     </SidebarMenuItem>
                 </SidebarMenu>
             </SidebarHeader>
 
-            <SidebarContent>
-                <NavMain items={mainNavItems} />
-
-                {/* Ventes : même apparence que NavMain mais déclenche une modale */}
-                <SidebarMenu>
-                    <SidebarMenuItem>
-                        <SidebarMenuButton asChild tooltip="Ventes">
-                            {/*
-                                On utilise un <a> avec href="/ventes" pour que :
-                                - L'item soit actif visuellement quand on est sur /ventes
-                                - Le clic ouvre la modale (preventDefault) sans naviguer
-                                - Le style reste identique aux autres items NavMain
-                            */}
-                            <a
-                                href="/ventes"
-                                onClick={(e) => {
-                                    e.preventDefault();
-                                    onVentesClick?.();
-                                }}
-                                className="flex items-center gap-2"
-                            >
-                                <Receipt />
-                                <span>Ventes</span>
-                            </a>
-                        </SidebarMenuButton>
-                    </SidebarMenuItem>
+            {/* ── NAV ── */}
+            <SidebarContent className="bg-gray-950 px-3 py-2">
+                <SidebarMenu className="gap-0.5">
+                    {navItems.map((item) => {
+                        const active = isActive(item.href);
+                        return (
+                            <SidebarMenuItem key={item.title}>
+                                <SidebarMenuButton
+                                    asChild
+                                    isActive={active}
+                                    tooltip={{ children: item.title }}
+                                    className={`group rounded-lg px-3 py-2.5 transition-all duration-150 ${
+                                        active
+                                            ? 'bg-[#7a1a2e] font-semibold text-white'
+                                            : 'text-gray-400 hover:bg-[#7a1a2e]/80 hover:text-white'
+                                    } `}
+                                >
+                                    {item.modal ? (
+                                        <a
+                                            href={item.href}
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                onVentesClick?.();
+                                            }}
+                                            className="flex items-center gap-3"
+                                        >
+                                            <item.icon size={17} />
+                                            <span className="text-sm">
+                                                {item.title}
+                                            </span>
+                                        </a>
+                                    ) : (
+                                        <Link
+                                            href={item.href}
+                                            prefetch
+                                            className="flex items-center gap-3"
+                                        >
+                                            <item.icon size={17} />
+                                            <span className="text-sm">
+                                                {item.title}
+                                            </span>
+                                        </Link>
+                                    )}
+                                </SidebarMenuButton>
+                            </SidebarMenuItem>
+                        );
+                    })}
                 </SidebarMenu>
+
+                {/* ── TOGGLE DARK / LIGHT ── */}
+                <div className="mt-6 px-1">
+                    <button
+                        onClick={toggleTheme}
+                        className="flex w-full items-center justify-between rounded-lg border border-gray-800 px-3 py-2.5 text-gray-400 transition-colors hover:border-gray-700 hover:text-white"
+                    >
+                        <div className="flex items-center gap-3">
+                            {isDark ? (
+                                <Moon size={16} className="text-blue-400" />
+                            ) : (
+                                <Sun size={16} className="text-yellow-400" />
+                            )}
+                            <span className="text-sm">
+                                {isDark ? 'Dark mode' : 'Light mode'}
+                            </span>
+                        </div>
+                        {/* Toggle pill */}
+                        <div
+                            className={`relative h-5 w-9 rounded-full transition-colors ${isDark ? 'bg-[#7a1a2e]' : 'bg-gray-600'}`}
+                        >
+                            <div
+                                className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${isDark ? 'translate-x-4' : 'translate-x-0.5'}`}
+                            />
+                        </div>
+                    </button>
+                </div>
             </SidebarContent>
 
-            <SidebarFooter>
+            {/* ── FOOTER ── */}
+            <SidebarFooter className="border-t border-gray-800 bg-gray-950 pb-3">
                 <NavFooter items={[]} className="mt-auto" />
                 <NavUser />
             </SidebarFooter>

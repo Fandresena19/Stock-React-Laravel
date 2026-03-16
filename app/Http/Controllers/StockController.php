@@ -57,7 +57,6 @@ class StockController extends Controller
 
     // =========================================================================
     // UPDATE QUANTITÉ inline — correction manuelle
-    // Colonnes exactes en base Windows : Code, QuantiteStock, PrixU, PrixTotal
     // =========================================================================
 
     public function update(Request $request)
@@ -67,27 +66,36 @@ class StockController extends Controller
             'quantite' => 'required|numeric|min:0',
         ]);
 
-        $stock = Stocks::where('Code', $request->input('Code'))->first();
+        $code     = $request->input('Code');
+        $quantite = (float) $request->input('quantite');
+
+        // Recherche insensible à la casse pour compatibilité Windows/WAMP
+        $stock = Stocks::whereRaw('BINARY `Code` = ?', [$code])->first()
+            ?? Stocks::where('Code', $code)->first();
 
         if (!$stock) {
             return response()->json([
                 'success' => false,
-                'message' => 'Article introuvable.',
+                'message' => "Article '{$code}' introuvable.",
             ], 404);
         }
 
         $prixU    = (float) ($stock->PrixU ?? 0);
-        $quantite = (float) $request->input('quantite');
+        $prixtotal = round($quantite * $prixU, 2);
 
-        $stock->update([
-            'QuantiteStock' => $quantite,
-            'PrixTotal'     => $quantite * $prixU,
-        ]);
+        // Mise à jour directe en SQL pour éviter tout problème de casse
+        \Illuminate\Support\Facades\DB::table('stocks')
+            ->where('Code', $code)
+            ->update([
+                'QuantiteStock' => $quantite,
+                'PrixTotal'     => $prixtotal,
+            ]);
 
         return response()->json([
-            'success'   => true,
-            'prixtotal' => number_format($quantite * $prixU, 2, '.', ''),
-            'prixU'     => number_format($prixU, 2, '.', ''),
+            'success'       => true,
+            'QuantiteStock' => $quantite,
+            'PrixTotal'     => number_format($prixtotal, 2, '.', ''),
+            'PrixU'         => number_format($prixU, 2, '.', ''),
         ]);
     }
 

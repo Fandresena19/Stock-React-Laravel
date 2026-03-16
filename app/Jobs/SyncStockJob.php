@@ -208,6 +208,10 @@ class SyncStockJob implements ShouldQueue
 
     // =========================================================================
     // 3. PrixU = prix du dernier achat par article
+    //
+    // IMPORTANT : PrixTotal calculé en SQL pur (QuantiteStock * nouveauPrixU)
+    // pour éviter le doublon avec syncVentesStock() qui a déjà mis à jour
+    // QuantiteStock et PrixTotal. On relit QuantiteStock depuis la base.
     // =========================================================================
 
     private function syncPrixU(): void
@@ -221,34 +225,24 @@ class SyncStockJob implements ShouldQueue
 
             if ($derniersPrix->isEmpty()) return;
 
-            $quantites = DB::table('stocks')
-                ->whereIn('Code', $derniersPrix->keys()->toArray())
-                ->select('Code', 'QuantiteStock')
-                ->get()
-                ->keyBy('Code');
-
             foreach ($derniersPrix->chunk(500) as $chunk) {
-                $prixCase  = 'CASE `Code`';
-                $totalCase = 'CASE `Code`';
-                $codes     = [];
+                $prixCase = 'CASE `Code`';
+                $codes    = [];
 
                 foreach ($chunk as $code => $row) {
-                    if (!isset($quantites[$code])) continue;
-                    $prixU    = (float) $row->PrixU;
-                    $newTotal = (float) $quantites[$code]->QuantiteStock * $prixU;
-                    $q        = DB::getPdo()->quote($code);
-
-                    $prixCase  .= " WHEN {$q} THEN {$prixU}";
-                    $totalCase .= " WHEN {$q} THEN {$newTotal}";
-                    $codes[]    = $q;
+                    $prixU     = (float) $row->PrixU;
+                    $q         = DB::getPdo()->quote($code);
+                    $prixCase .= " WHEN {$q} THEN {$prixU}";
+                    $codes[]   = $q;
                 }
 
                 if (empty($codes)) continue;
 
+                // PrixTotal = QuantiteStock réelle en base * nouveauPrixU → 1 seul calcul
                 DB::statement('
                     UPDATE stocks
                     SET PrixU     = ' . $prixCase . ' END,
-                        PrixTotal = ' . $totalCase . ' END
+                        PrixTotal = QuantiteStock * (' . $prixCase . ' END)
                     WHERE `Code` IN (' . implode(',', $codes) . ')
                 ');
             }
