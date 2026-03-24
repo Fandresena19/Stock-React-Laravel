@@ -8,20 +8,21 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
 
 /**
  * SyncStockJob
  * ─────────────────────────────────────────────────────────────────────────────
- * Lancé en arrière-plan via :
- *   php artisan queue:work --queue=stock --sleep=3 --tries=3
+ * Synchronise le stock avec les mouvements d'hier uniquement.
  *
- * Déclenché automatiquement à chaque visite de /stocks (si cache expiré).
+ * E1 est char(30) avec virgule française ("0,174") →
+ *   converti via CAST(REPLACE(E1, ',', '.') AS DECIMAL(10,3))
  *
- * Ce que le job fait :
- *   1. syncArticlesManquants() — INSERT articles absents de stocks
- *   2. syncVentesStock()       — QuantiteStock = SUM(achats) - SUM(ventes)
- *   3. syncPrixU()             — PrixU = dernier prix d'achat par article
+ * CONNEXIONS :
+ *   mysql        → stocks, achats, articles
+ *   mysql_ventes → servmcljournal* (tables ventes)
  * ─────────────────────────────────────────────────────────────────────────────
  */
 class SyncStockJob implements ShouldQueue
@@ -29,17 +30,20 @@ class SyncStockJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries   = 1;
-    public int $timeout = 3600;
+    public int $timeout = 300;
+
+    private const DB_VENTES = 'mysql_ventes';
+    private const E1_DECIMAL = "CAST(REPLACE(E1, ',', '.') AS DECIMAL(10,3))";
 
     public function handle(): void
     {
-        Log::info('SyncStockJob: démarrage');
+        $hier = Carbon::yesterday();
+        Log::info('SyncStockJob: démarrage pour ' . $hier->format('d/m/Y'));
 
         $this->syncArticlesManquants();
-        $this->syncVentesStock();
-        $this->syncPrixU();
+        $this->syncMouvementsHier($hier);
+        $this->syncPrixU($hier);
 
-        // Valide pendant 6h — évite de relancer le job à chaque visite
         cache()->put('sync_done', true, now()->addHours(6));
         cache()->forget('sync_job_dispatched');
 
@@ -47,7 +51,7 @@ class SyncStockJob implements ShouldQueue
     }
 
     // =========================================================================
-    // 1. Insérer les articles manquants dans stocks
+    // 1. Articles manquants dans stocks
     // =========================================================================
 
     private function syncArticlesManquants(): void
@@ -75,157 +79,122 @@ class SyncStockJob implements ShouldQueue
                 Log::info('SyncStockJob: ' . $missing->count() . ' article(s) insérés.');
             }
 
-            // Sync Liblong + fournisseur depuis articles
-            DB::statement('
+            DB::statement("
                 UPDATE stocks s
-                INNER JOIN articles a ON s.Code COLLATE utf8mb3_unicode_ci = a.Code COLLATE utf8mb3_unicode_ci
+                INNER JOIN articles a
+                    ON s.Code COLLATE utf8mb3_unicode_ci = a.Code COLLATE utf8mb3_unicode_ci
                 SET s.Liblong     = a.Liblong,
                     s.fournisseur = a.fournisseur
-            ');
+            ");
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncArticles: ' . $e->getMessage());
         }
     }
 
     // =========================================================================
-    // 2. QuantiteStock = SUM(achats) - SUM(ventes)
-    //    Utilise COUNT(*) par table comme signature de changement
-    //    (UPDATE_TIME = NULL sous WAMP/Windows — non fiable)
+    // 2. Ajustement incrémental d'hier
+    //    QuantiteStock += achat_hier - vente_hier (E1 converti)
     // =========================================================================
 
-    private function syncVentesStock(): void
+    private function syncMouvementsHier(Carbon $hier): void
     {
         try {
-            $database = DB::getDatabaseName();
+            $hierDate  = $hier->format('Y-m-d');
+            $tableName = 'servmcljournal' . $hier->format('Ymd');
+            $e1        = self::E1_DECIMAL;
 
-            // Lister toutes les tables servmcljournal* avec colonnes idcint + E1
-            $venteTables = DB::select("
-                SELECT t.TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES t
-                WHERE t.TABLE_SCHEMA = ?
-                  AND t.TABLE_NAME LIKE 'servmcljournal%'
-                  AND (
-                      SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS c
-                      WHERE c.TABLE_SCHEMA = t.TABLE_SCHEMA
-                        AND c.TABLE_NAME   = t.TABLE_NAME
-                        AND c.COLUMN_NAME IN ('idcint', 'E1')
-                  ) = 2
-                ORDER BY t.TABLE_NAME DESC
-            ", [$database]);
-
-            if (empty($venteTables)) {
-                Log::info('SyncStockJob::syncVentes: aucune table servmcljournal trouvée.');
-                return;
-            }
-
-            // Détecter les tables modifiées via COUNT(*) — fiable sous WAMP
-            $tablesModifiees = [];
-            foreach ($venteTables as $row) {
-                try {
-                    $count    = DB::table($row->TABLE_NAME)->count();
-                    $cacheKey = 'vente_count_' . $row->TABLE_NAME;
-                    $cached   = cache()->get($cacheKey);
-
-                    if ($cached === null || (int) $cached !== $count) {
-                        $tablesModifiees[] = ['name' => $row->TABLE_NAME, 'count' => $count];
-                    }
-                } catch (\Throwable) {
-                    // Table inaccessible → ignorée
-                }
-            }
-
-            if (empty($tablesModifiees)) {
-                Log::info('SyncStockJob::syncVentes: aucune table modifiée.');
-                return;
-            }
-
-            Log::info('SyncStockJob::syncVentes: ' . count($tablesModifiees) . '/' . count($venteTables) . ' table(s) modifiée(s).');
-
-            // Agréger toutes les ventes (toutes les tables pour total cohérent)
-            $ventesTotaux = [];
-            foreach ($venteTables as $row) {
-                try {
-                    $rows = DB::select("
-                        SELECT idcint AS Code, COALESCE(SUM(E1), 0) AS total_vente
-                        FROM `{$row->TABLE_NAME}`
-                        GROUP BY idcint
-                    ");
-                    foreach ($rows as $r) {
-                        $ventesTotaux[$r->Code] = ($ventesTotaux[$r->Code] ?? 0.0) + (float) $r->total_vente;
-                    }
-                } catch (\Throwable $e) {
-                    Log::warning('SyncStockJob: table ' . $row->TABLE_NAME . ' ignorée — ' . $e->getMessage());
-                }
-            }
-
-            // Totaux achats par Code
-            $achats = DB::table('achats')
+            // Achats d'hier
+            $achatsHier = DB::table('achats')
+                ->whereDate('date', $hierDate)
                 ->selectRaw('Code, COALESCE(SUM(QuantiteAchat), 0) AS total_achat')
                 ->groupBy('Code')
                 ->get()
                 ->keyBy('Code');
 
-            // Bulk UPDATE par chunks de 500 — CASE WHEN pour éviter N requêtes
-            $stocks = DB::table('stocks')->select('Code', 'PrixU')->get();
+            Log::info('SyncStockJob: ' . $achatsHier->count() . ' article(s) achetés hier.');
 
-            foreach ($stocks->chunk(500) as $chunk) {
-                $qteCase   = 'CASE `Code`';
-                $totalCase = 'CASE `Code`';
-                $codes     = [];
+            // Ventes d'hier — E1 converti en DECIMAL
+            $ventesHier = collect();
+            $dbVentes   = DB::connection(self::DB_VENTES);
 
-                foreach ($chunk as $stock) {
-                    $code   = $stock->Code;
-                    $prixU  = (float) ($stock->PrixU ?? 0);
-                    $newQte = (isset($achats[$code]) ? (float) $achats[$code]->total_achat : 0.0)
-                        - ($ventesTotaux[$code] ?? 0.0);
-                    $q      = DB::getPdo()->quote($code);
+            if (Schema::connection(self::DB_VENTES)->hasTable($tableName)) {
+                $rows = $dbVentes->select("
+                    SELECT idcint AS Code,
+                           COALESCE(SUM({$e1}), 0) AS total_vente
+                    FROM `{$tableName}`
+                    GROUP BY idcint
+                ");
+                $ventesHier = collect($rows)->keyBy('Code');
+                Log::info('SyncStockJob: ' . $ventesHier->count() . ' article(s) vendus hier (' . $tableName . ').');
+            } else {
+                Log::info('SyncStockJob: table ' . $tableName . ' absente — ventes = 0.');
+            }
 
-                    $qteCase   .= " WHEN {$q} THEN {$newQte}";
-                    $totalCase .= ' WHEN ' . $q . ' THEN ' . ($newQte * $prixU);
-                    $codes[]    = $q;
+            if ($achatsHier->isEmpty() && $ventesHier->isEmpty()) {
+                Log::info('SyncStockJob: aucun mouvement hier.');
+                return;
+            }
+
+            // Tous les codes concernés hier
+            $codes = $achatsHier->keys()
+                ->merge($ventesHier->keys())
+                ->unique()
+                ->values();
+
+            // Bulk UPDATE par chunks de 500
+            foreach ($codes->chunk(500) as $chunk) {
+                $deltaCase = 'CASE `Code`';
+                $codesSql  = [];
+
+                foreach ($chunk as $code) {
+                    $achat = isset($achatsHier[$code]) ? (float) $achatsHier[$code]->total_achat : 0.0;
+                    $vente = isset($ventesHier[$code]) ? (float) $ventesHier[$code]->total_vente  : 0.0;
+                    $delta = $achat - $vente;
+                    $q     = DB::getPdo()->quote($code);
+
+                    $deltaCase  .= " WHEN {$q} THEN QuantiteStock + {$delta}";
+                    $codesSql[] = $q;
                 }
 
-                if (empty($codes)) continue;
+                if (empty($codesSql)) continue;
 
                 DB::statement('
                     UPDATE stocks
-                    SET QuantiteStock = ' . $qteCase . ' END,
-                        PrixTotal     = ' . $totalCase . ' END
-                    WHERE `Code` IN (' . implode(',', $codes) . ')
+                    SET QuantiteStock = ' . $deltaCase . ' END,
+                        PrixTotal     = (' . $deltaCase . ' END) * PrixU
+                    WHERE `Code` IN (' . implode(',', $codesSql) . ')
                 ');
             }
 
-            // Mettre à jour le cache COUNT par table
-            foreach ($tablesModifiees as $table) {
-                cache()->put('vente_count_' . $table['name'], $table['count'], now()->addDays(30));
-            }
-
-            Log::info('SyncStockJob::syncVentes: stocks mis à jour.');
+            Log::info('SyncStockJob: ' . $codes->count() . ' article(s) mis à jour.');
         } catch (\Throwable $e) {
-            Log::error('SyncStockJob::syncVentes: ' . $e->getMessage());
+            Log::error('SyncStockJob::syncMouvementsHier: ' . $e->getMessage());
         }
     }
 
     // =========================================================================
-    // 3. PrixU = prix du dernier achat par article
-    //
-    // IMPORTANT : PrixTotal calculé en SQL pur (QuantiteStock * nouveauPrixU)
-    // pour éviter le doublon avec syncVentesStock() qui a déjà mis à jour
-    // QuantiteStock et PrixTotal. On relit QuantiteStock depuis la base.
+    // 3. PrixU = prix du dernier achat d'hier
+    //    PrixTotal recalculé en SQL pur — pas de doublon
     // =========================================================================
 
-    private function syncPrixU(): void
+    private function syncPrixU(Carbon $hier): void
     {
         try {
-            $derniersPrix = DB::table('achats as a')
-                ->select('a.Code', 'a.PrixU')
-                ->whereRaw('a.date = (SELECT MAX(date) FROM achats WHERE Code = a.Code)')
+            $hierDate = $hier->format('Y-m-d');
+
+            $prixHier = DB::table('achats')
+                ->whereDate('date', $hierDate)
+                ->selectRaw('Code, MAX(PrixU) AS PrixU')
+                ->groupBy('Code')
                 ->get()
                 ->keyBy('Code');
 
-            if ($derniersPrix->isEmpty()) return;
+            if ($prixHier->isEmpty()) {
+                Log::info('SyncStockJob::syncPrixU: aucun achat hier.');
+                return;
+            }
 
-            foreach ($derniersPrix->chunk(500) as $chunk) {
+            foreach ($prixHier->chunk(500) as $chunk) {
                 $prixCase = 'CASE `Code`';
                 $codes    = [];
 
@@ -238,7 +207,7 @@ class SyncStockJob implements ShouldQueue
 
                 if (empty($codes)) continue;
 
-                // PrixTotal = QuantiteStock réelle en base * nouveauPrixU → 1 seul calcul
+                // PrixTotal = QuantiteStock * nouveauPrixU en SQL pur
                 DB::statement('
                     UPDATE stocks
                     SET PrixU     = ' . $prixCase . ' END,
@@ -247,7 +216,7 @@ class SyncStockJob implements ShouldQueue
                 ');
             }
 
-            Log::info('SyncStockJob::syncPrixU: terminé.');
+            Log::info('SyncStockJob::syncPrixU: ' . $prixHier->count() . ' prix mis à jour.');
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncPrixU: ' . $e->getMessage());
         }

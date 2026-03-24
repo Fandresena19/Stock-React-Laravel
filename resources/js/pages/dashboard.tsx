@@ -1,16 +1,15 @@
 import { Head, router } from '@inertiajs/react';
 import {
     Boxes,
-    Warehouse,
+    PackageSearch,
     TriangleAlert,
     AlertOctagon,
     ShoppingCart,
     PackagePlus,
 } from 'lucide-react';
-import AppLayout from '@/layouts/app-layout';
 import { route } from 'ziggy-js';
+import AppLayout from '@/layouts/app-layout';
 
-// ── Formatage ─────────────────────────────────────────────────────────────────
 const n = (v: any): number => {
     const x = parseFloat(v);
     return isNaN(x) ? 0 : x;
@@ -20,8 +19,6 @@ const fmtFull = (v: any, dec = 0): string =>
         minimumFractionDigits: dec,
         maximumFractionDigits: dec,
     });
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 export default function Dashboard({
     hierLabel,
@@ -64,31 +61,31 @@ export default function Dashboard({
                     </div>
                 </div>
 
-                {/* ── STAT CARDS GLOBALES ── */}
-                <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                {/* ── STAT CARDS — même style que stocks/index ── */}
+                <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <StatCard
+                        icon={<Boxes size={18} />}
                         label="Total Articles"
                         value={fmtFull(stats?.total_articles)}
-                        icon={<Boxes size={18} />}
-                        color="gray"
+                        color="bordeaux"
                     />
                     <StatCard
+                        icon={<PackageSearch size={18} />}
                         label="Valeur Stock"
                         value={fmtFull(stats?.valeur_stock) + ' Ar'}
-                        icon={<Warehouse size={18} />}
-                        color="indigo"
+                        color="teal"
                     />
                     <StatCard
+                        icon={<AlertOctagon size={18} />}
                         label="Ruptures"
                         value={fmtFull(stats?.ruptures)}
-                        icon={<AlertOctagon size={18} />}
                         color="red"
                     />
                     <StatCard
+                        icon={<TriangleAlert size={18} />}
                         label="Stock Faible (≤ 5)"
                         value={fmtFull(stats?.stock_faible)}
-                        icon={<TriangleAlert size={18} />}
-                        color="orange"
+                        color="gray"
                     />
                 </div>
 
@@ -120,7 +117,6 @@ export default function Dashboard({
                             </div>
                         ) : (
                             <>
-                                {/* Totaux ventes */}
                                 <div className="mb-4 grid grid-cols-3 gap-3">
                                     <MiniKpi
                                         label="Montant net"
@@ -143,7 +139,6 @@ export default function Dashboard({
                                     />
                                 </div>
 
-                                {/* Détail ventes ligne par ligne */}
                                 {(ventesHier.detail ?? []).length > 0 ? (
                                     <div className="overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700">
                                         <div className="max-h-[280px] overflow-y-auto">
@@ -169,7 +164,7 @@ export default function Dashboard({
                                                                 className="transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/30"
                                                             >
                                                                 <td className="px-3 py-2">
-                                                                    <p className="max-w-[180px] truncate font-medium text-gray-800 dark:text-gray-200">
+                                                                    <p className="max-w-[200px] truncate font-medium text-gray-800 dark:text-gray-200">
                                                                         {
                                                                             a.liblong
                                                                         }
@@ -178,7 +173,7 @@ export default function Dashboard({
                                                                         {a.code}
                                                                     </p>
                                                                 </td>
-                                                                <td className="px-3 py-2 text-right text-gray-600 dark:text-gray-400">
+                                                                <td className="px-3 py-2 text-right text-gray-600 dark:text-gray-300">
                                                                     {fmtFull(
                                                                         a.qte,
                                                                         1,
@@ -199,8 +194,7 @@ export default function Dashboard({
                                     </div>
                                 ) : (
                                     <div className="rounded-xl bg-gray-50 px-4 py-6 text-center text-sm text-gray-400 dark:bg-gray-700/30">
-                                        Aucune vente enregistrée pour{' '}
-                                        {hierLabel}
+                                        Aucune vente enregistrée
                                     </div>
                                 )}
                             </>
@@ -210,10 +204,10 @@ export default function Dashboard({
                     {/* Achats d'hier */}
                     <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800">
                         <div className="mb-4 flex items-center gap-3">
-                            <div className="rounded-xl bg-teal-50 p-2.5 dark:bg-teal-900/20">
+                            <div className="rounded-xl bg-teal-100 p-2.5 dark:bg-teal-900/30">
                                 <PackagePlus
                                     size={18}
-                                    className="text-teal-600 dark:text-teal-400"
+                                    className="text-teal-700 dark:text-teal-400"
                                 />
                             </div>
                             <div>
@@ -221,12 +215,11 @@ export default function Dashboard({
                                     Achats — {hierLabel}
                                 </h2>
                                 <p className="text-xs text-gray-400">
-                                    Table achats filtrée sur date = hier
+                                    Base principale
                                 </p>
                             </div>
                         </div>
 
-                        {/* Totaux achats */}
                         <div className="mb-4 grid grid-cols-3 gap-3">
                             <MiniKpi
                                 label="Montant total"
@@ -244,7 +237,6 @@ export default function Dashboard({
                             />
                         </div>
 
-                        {/* Détail achats */}
                         {(achatsHier?.detail ?? []).length > 0 ? (
                             <div className="overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700">
                                 <div className="max-h-[280px] overflow-y-auto">
@@ -270,14 +262,14 @@ export default function Dashboard({
                                                         className="transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/30"
                                                     >
                                                         <td className="px-3 py-2">
-                                                            <p className="max-w-[180px] truncate font-medium text-gray-800 dark:text-gray-200">
+                                                            <p className="max-w-[200px] truncate font-medium text-gray-800 dark:text-gray-200">
                                                                 {a.Liblong}
                                                             </p>
                                                             <p className="font-mono text-xs text-gray-400">
                                                                 {a.Code}
                                                             </p>
                                                         </td>
-                                                        <td className="px-3 py-2 text-right text-gray-600 dark:text-gray-400">
+                                                        <td className="px-3 py-2 text-right text-gray-600 dark:text-gray-300">
                                                             {fmtFull(
                                                                 a.QuantiteAchat,
                                                                 1,
@@ -296,7 +288,7 @@ export default function Dashboard({
                             </div>
                         ) : (
                             <div className="rounded-xl bg-gray-50 px-4 py-6 text-center text-sm text-gray-400 dark:bg-gray-700/30">
-                                Aucun achat enregistré pour {hierLabel}
+                                Aucun achat enregistré pour cette date
                             </div>
                         )}
                     </div>
@@ -304,7 +296,7 @@ export default function Dashboard({
 
                 {/* ── RUPTURES + STOCKS FAIBLES ── */}
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                    {/* Ruptures (Qte = 0) */}
+                    {/* Ruptures */}
                     <div className="rounded-2xl border border-red-200 bg-white p-5 shadow-sm dark:border-red-900/30 dark:bg-gray-800">
                         <div className="mb-4 flex items-center justify-between">
                             <div className="flex items-center gap-2">
@@ -325,7 +317,7 @@ export default function Dashboard({
                                         route('stocks.index') + '?max_qte=1',
                                     )
                                 }
-                                className="text-xs font-semibold text-[#7a1a2e] hover:underline dark:text-red-400"
+                                className="text-xs font-semibold text-red-600 hover:underline dark:text-red-400"
                             >
                                 Voir tout →
                             </button>
@@ -382,7 +374,7 @@ export default function Dashboard({
                         </div>
                     </div>
 
-                    {/* Stocks faibles (0 < Qte <= 5) */}
+                    {/* Stocks faibles */}
                     <div className="rounded-2xl border border-orange-200 bg-white p-5 shadow-sm dark:border-orange-900/30 dark:bg-gray-800">
                         <div className="mb-4 flex items-center justify-between">
                             <div className="flex items-center gap-2">
@@ -466,37 +458,33 @@ export default function Dashboard({
     );
 }
 
-// ── StatCard ──────────────────────────────────────────────────────────────────
+// ── StatCard — identique à stocks/index ──────────────────────────────────────
 function StatCard({
+    icon,
     label,
     value,
-    icon,
     color,
 }: {
+    icon: React.ReactNode;
     label: string;
     value: string;
-    icon: React.ReactNode;
-    color: 'gray' | 'indigo' | 'red' | 'orange';
+    color: string;
 }) {
-    const styles: Record<string, string> = {
-        gray: 'bg-gray-700',
-        indigo: 'bg-indigo-700',
+    const bg: Record<string, string> = {
+        bordeaux: 'bg-[#7a1a2e]',
+        teal: 'bg-teal-700',
         red: 'bg-red-700',
-        orange: 'bg-orange-600',
+        gray: 'bg-gray-700',
     };
     return (
-        <div
-            className={`rounded-2xl p-4 text-white shadow-sm ${styles[color]}`}
-        >
+        <div className={`rounded-2xl p-4 text-white shadow-sm ${bg[color]}`}>
             <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-semibold tracking-wider uppercase opacity-75">
+                <p className="text-xs font-semibold tracking-wide uppercase opacity-75">
                     {label}
                 </p>
                 <div className="rounded-lg bg-white/15 p-1.5">{icon}</div>
             </div>
-            <p className="text-xl leading-tight font-black tabular-nums">
-                {value}
-            </p>
+            <p className="text-2xl font-bold tracking-tight">{value}</p>
         </div>
     );
 }

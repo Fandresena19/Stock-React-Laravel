@@ -2,21 +2,21 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\SyncStockJob;
+use App\Exports\StockExport;
 use App\Models\Stocks;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
+use Maatwebsite\Excel\Facades\Excel;
 
 class StockController extends Controller
 {
     // =========================================================================
-    // PAGE PRINCIPALE — dispatch job en arrière-plan + lecture seule
+    // PAGE PRINCIPALE
     // =========================================================================
 
     public function index(Request $request)
     {
-        $this->dispatchSyncSiNecessaire();
-
         $search      = $request->input('search', '');
         $fournisseur = $request->input('fournisseur', '');
         $maxQte      = $request->input('max_qte', '');
@@ -30,7 +30,7 @@ class StockController extends Controller
             $search,
             fn($q) =>
             $q->where('Code',          'like', "%{$search}%")
-                ->orWhere('Liblong',     'like', "%{$search}%")
+                ->orWhere('Liblong',    'like', "%{$search}%")
                 ->orWhere('fournisseur', 'like', "%{$search}%")
         )
             ->when($fournisseur, fn($q) => $q->where('fournisseur', $fournisseur))
@@ -40,7 +40,7 @@ class StockController extends Controller
             ->withQueryString();
 
         $stats = [
-            'total_articles'  => Stocks::count(),
+            'total_articles'  => DB::table('articles')->count(),
             'total_valeur'    => Stocks::sum('PrixTotal'),
             'ruptures'        => Stocks::where('QuantiteStock', '<=', 0)->count(),
             'fournisseurs_nb' => Stocks::whereNotNull('fournisseur')->distinct('fournisseur')->count(),
@@ -51,12 +51,11 @@ class StockController extends Controller
             'fournisseursList' => $fournisseursList,
             'stats'            => $stats,
             'filters'          => compact('search', 'fournisseur') + ['max_qte' => $maxQte],
-            'sync_en_cours'    => !cache()->get('sync_done'),
         ]);
     }
 
     // =========================================================================
-    // UPDATE QUANTITÉ inline — correction manuelle
+    // UPDATE QUANTITÉ inline
     // =========================================================================
 
     public function update(Request $request)
@@ -69,48 +68,42 @@ class StockController extends Controller
         $code     = $request->input('Code');
         $quantite = (float) $request->input('quantite');
 
-        // Recherche insensible à la casse pour compatibilité Windows/WAMP
-        $stock = Stocks::whereRaw('BINARY `Code` = ?', [$code])->first()
-            ?? Stocks::where('Code', $code)->first();
+        $stock = Stocks::where('Code', $code)->first();
 
         if (!$stock) {
-            return response()->json([
-                'success' => false,
-                'message' => "Article '{$code}' introuvable.",
-            ], 404);
+            return response()->json(['success' => false, 'message' => 'Article introuvable.'], 404);
         }
 
-        $prixU    = (float) ($stock->PrixU ?? 0);
-        $prixtotal = round($quantite * $prixU, 2);
+        $prixU     = (float) ($stock->PrixU ?? 0);
+        $prixTotal = round($quantite * $prixU, 2);
 
-        // Mise à jour directe en SQL pour éviter tout problème de casse
-        \Illuminate\Support\Facades\DB::table('stocks')
-            ->where('Code', $code)
-            ->update([
-                'QuantiteStock' => $quantite,
-                'PrixTotal'     => $prixtotal,
-            ]);
+        DB::table('stocks')->where('Code', $code)->update([
+            'QuantiteStock' => $quantite,
+            'PrixTotal'     => $prixTotal,
+        ]);
 
         return response()->json([
-            'success'       => true,
-            'QuantiteStock' => $quantite,
-            'PrixTotal'     => number_format($prixtotal, 2, '.', ''),
-            'PrixU'         => number_format($prixU, 2, '.', ''),
+            'success'   => true,
+            'prixtotal' => number_format($prixTotal, 2, '.', ''),
+            'prixU'     => number_format($prixU, 2, '.', ''),
         ]);
     }
 
     // =========================================================================
-    // PRIVÉ — anti-boucle : dispatch seulement si cache expiré ET pas déjà en queue
+    // EXPORT EXCEL — tout le stock (ou filtré si filtres actifs)
     // =========================================================================
 
-    private function dispatchSyncSiNecessaire(): void
+    public function export(Request $request)
     {
-        if (cache()->get('sync_done'))           return;
-        if (cache()->get('sync_job_dispatched')) return;
+        $search      = $request->input('search', '');
+        $fournisseur = $request->input('fournisseur', '');
+        $maxQte      = $request->input('max_qte', '');
 
-        SyncStockJob::dispatch()->onQueue('stock');
+        $filename = 'stock_' . now()->format('Ymd') . '.xlsx';
 
-        // Bloquer un nouveau dispatch pendant 35 min (durée max du job)
-        cache()->put('sync_job_dispatched', true, now()->addMinutes(35));
+        return Excel::download(
+            new StockExport($search, $fournisseur, $maxQte),
+            $filename
+        );
     }
 }

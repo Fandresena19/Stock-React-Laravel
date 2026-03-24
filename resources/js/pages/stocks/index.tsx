@@ -5,6 +5,7 @@ import {
     TriangleAlert,
     Users,
     RefreshCw,
+    FileSpreadsheet,
 } from 'lucide-react';
 import { useState, useRef } from 'react';
 import { route } from 'ziggy-js';
@@ -28,11 +29,25 @@ const fmt = (v: any, d = 0) =>
 function getCsrfToken(): string {
     const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
     if (match) return decodeURIComponent(match[1]);
-    // Fallback : meta tag
     return (
         (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)
             ?.content ?? ''
     );
+}
+
+// Construit l'URL d'export avec les filtres actifs
+function buildExportUrl(
+    base: string,
+    search: string,
+    fournisseur: string,
+    maxQte: string,
+): string {
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (fournisseur) params.set('fournisseur', fournisseur);
+    if (maxQte) params.set('max_qte', maxQte);
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
 }
 
 export default function Index({
@@ -67,7 +82,6 @@ export default function Index({
     const saveEdit = async (Code: string) => {
         setSaving(true);
         try {
-            // Lire le token depuis le cookie XSRF-TOKEN (méthode Inertia/Laravel)
             const csrf = getCsrfToken();
             const body = JSON.stringify({
                 Code,
@@ -110,20 +124,54 @@ export default function Index({
         }
     };
 
+    // ── Export Excel : navigation directe (le serveur renvoie un fichier)
+    const handleExportExcel = () => {
+        const url = buildExportUrl(
+            '/stocks/export',
+            search,
+            fournisseur,
+            maxQte,
+        );
+        window.location.href = url;
+    };
+
     const rows = Array.isArray(stocks?.data) ? stocks.data : [];
     const links = Array.isArray(stocks?.links) ? stocks.links : [];
 
+    const hasFilters = !!(search || fournisseur || maxQte);
+
     return (
         <AppLayout>
-            <Head title="Stocks" />
+            <Head title="Stocks " />
             <div className="min-h-screen bg-gray-50 p-6 dark:bg-gray-900">
-                <div className="mb-6">
-                    <h1 className="text-2xl font-bold text-gray-800 dark:text-white">
-                        Gestion des Stocks
-                    </h1>
-                    <p className="text-sm text-gray-400">
-                        Cliquez sur une quantité pour la modifier manuellement
-                    </p>
+                {/* ── TITRE + BOUTONS EXPORT ── */}
+                <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h1 className="text-2xl font-bold text-gray-800 dark:text-white">
+                            Gestion des Stocks
+                        </h1>
+                        <p className="text-sm text-gray-400">
+                            Cliquez sur une quantité pour la modifier
+                            manuellement
+                        </p>
+                    </div>
+
+                    {/* Boutons export */}
+                    <div className="flex items-center gap-2">
+                        {hasFilters && (
+                            <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                Export filtré
+                            </span>
+                        )}
+                        <button
+                            onClick={handleExportExcel}
+                            title="Exporter le stock en Excel (.xlsx)"
+                            className="flex items-center gap-2 rounded-xl border border-green-200 bg-white px-4 py-2.5 text-sm font-semibold text-green-700 shadow-sm transition-all hover:border-green-300 hover:bg-green-50 active:scale-95 dark:border-green-800 dark:bg-gray-800 dark:text-green-400 dark:hover:bg-green-900/20"
+                        >
+                            <FileSpreadsheet size={15} />
+                            Excel
+                        </button>
+                    </div>
                 </div>
 
                 {/* Bandeau sync */}
@@ -133,9 +181,7 @@ export default function Index({
                             size={14}
                             className="flex-shrink-0 animate-spin"
                         />
-                        <span>
-                            Synchronisation du stock en cours en arrière-plan…
-                        </span>
+                        <span>Synchronisation du stock en cours…</span>
                         <button
                             onClick={() =>
                                 router.reload({
@@ -149,13 +195,14 @@ export default function Index({
                     </div>
                 )}
 
-                {/* Stats */}
+                {/* Stats — total_articles = catalogue complet */}
                 <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <StatCard
                         icon={<Boxes size={18} />}
                         label="Total articles"
                         value={fmt(stats?.total_articles)}
                         color="bordeaux"
+                        tooltip="Tous les articles du catalogue"
                     />
                     <StatCard
                         icon={<PackageSearch size={18} />}
@@ -218,6 +265,25 @@ export default function Index({
                             className="w-24 bg-transparent py-2.5 text-sm focus:outline-none dark:text-white"
                         />
                     </div>
+
+                    {/* Reset filtres */}
+                    {hasFilters && (
+                        <button
+                            onClick={() => {
+                                setSearch('');
+                                setFournisseur('');
+                                setMaxQte('');
+                                apply({
+                                    search: '',
+                                    fournisseur: '',
+                                    max_qte: '',
+                                });
+                            }}
+                            className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-xs font-semibold text-gray-500 shadow-sm hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400"
+                        >
+                            ✕ Effacer filtres
+                        </button>
+                    )}
                 </div>
 
                 <DataTable
@@ -334,11 +400,13 @@ function StatCard({
     label,
     value,
     color,
+    tooltip,
 }: {
     icon: React.ReactNode;
     label: string;
     value: string;
     color: string;
+    tooltip?: string;
 }) {
     const bg: any = {
         bordeaux: 'bg-[#7a1a2e]',
@@ -347,7 +415,10 @@ function StatCard({
         gray: 'bg-gray-700',
     };
     return (
-        <div className={`rounded-2xl p-4 text-white shadow-sm ${bg[color]}`}>
+        <div
+            className={`rounded-2xl p-4 text-white shadow-sm ${bg[color]}`}
+            title={tooltip}
+        >
             <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-semibold tracking-wide uppercase opacity-75">
                     {label}

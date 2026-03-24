@@ -65,13 +65,14 @@ export function AppSidebar({ onVentesClick }: AppSidebarProps) {
                                 className="flex items-center gap-3"
                             >
                                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#7a1a2e]">
-                                    <Warehouse
-                                        size={16}
-                                        className="text-white"
+                                    <img
+                                        src="/image/logo_ncopie.jpg"
+                                        alt=""
+                                        className="rounded-lg"
                                     />
                                 </div>
                                 <span className="text-sm font-bold tracking-wide text-white">
-                                    Gestion de stocks
+                                    Gestion des stocks
                                 </span>
                             </Link>
                         </SidebarMenuButton>
