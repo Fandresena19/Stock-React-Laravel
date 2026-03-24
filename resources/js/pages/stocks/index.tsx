@@ -179,7 +179,7 @@ export default function Index({
                     <div className="mb-4 flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
                         <RefreshCw
                             size={14}
-                            className="flex-shrink-0 animate-spin"
+                            className="shrink-0 animate-spin"
                         />
                         <span>Synchronisation du stock en cours…</span>
                         <button
@@ -226,7 +226,7 @@ export default function Index({
 
                 {/* Filtres */}
                 <div className="mb-4 flex flex-wrap gap-3">
-                    <div className="min-w-[200px] flex-1">
+                    <div className="min-w-50 flex-1">
                         <SearchInput
                             value={search}
                             onChange={(v) => {
