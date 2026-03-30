@@ -6,8 +6,9 @@ import {
     Users,
     RefreshCw,
     FileSpreadsheet,
+    CheckCircle,
 } from 'lucide-react';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { route } from 'ziggy-js';
 import {
     DataTable,
@@ -25,7 +26,6 @@ const n = (v: any) => {
 const fmt = (v: any, d = 0) =>
     n(v).toLocaleString('fr-FR', { minimumFractionDigits: d });
 
-// Lit le CSRF token depuis le cookie XSRF-TOKEN (standard Laravel/Inertia)
 function getCsrfToken(): string {
     const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
     if (match) return decodeURIComponent(match[1]);
@@ -35,7 +35,6 @@ function getCsrfToken(): string {
     );
 }
 
-// Construit l'URL d'export avec les filtres actifs
 function buildExportUrl(
     base: string,
     search: string,
@@ -50,6 +49,44 @@ function buildExportUrl(
     return qs ? `${base}?${qs}` : base;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook polling sync status toutes les 5s
+// ─────────────────────────────────────────────────────────────────────────────
+function useSyncStatus(initialEnCours: boolean) {
+    const [status, setStatus] = useState<'running' | 'done' | 'pending'>(
+        initialEnCours ? 'running' : 'done',
+    );
+
+    useEffect(() => {
+        if (status === 'done') return;
+
+        const poll = async () => {
+            try {
+                const res = await fetch('/stocks/sync-status', {
+                    headers: { Accept: 'application/json' },
+                });
+                const data = await res.json();
+                setStatus(data.status);
+                if (data.status === 'done') {
+                    router.reload({
+                        only: ['stocks', 'stats', 'sync_en_cours'],
+                    });
+                }
+            } catch {
+                // réseau instable, on réessaie
+            }
+        };
+
+        const interval = setInterval(poll, 5000);
+        return () => clearInterval(interval);
+    }, [status]);
+
+    return status;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Index({
     stocks,
     fournisseursList,
@@ -60,18 +97,40 @@ export default function Index({
     const [search, setSearch] = useState(filters?.search ?? '');
     const [fournisseur, setFournisseur] = useState(filters?.fournisseur ?? '');
     const [maxQte, setMaxQte] = useState(filters?.max_qte ?? '');
+    const [sortBy, setSortBy] = useState(filters?.sort_by ?? 'Code');
     const [editingCode, setEditingCode] = useState<string | null>(null);
     const [editQte, setEditQte] = useState('');
     const [saving, setSaving] = useState(false);
     const [savedCode, setSavedCode] = useState<string | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
 
-    const apply = (o: any = {}) =>
-        router.get(
-            route('stocks.index'),
-            { search, fournisseur, max_qte: maxQte, ...o },
-            { preserveState: true, replace: true },
-        );
+    const syncStatus = useSyncStatus(sync_en_cours);
+
+    // On passe toujours les valeurs courantes EN DUR dans `o` pour éviter
+    // le bug setState asynchrone (la valeur lue depuis le state est l'ancienne).
+    const apply = (o: any = {}) => {
+        const params = {
+            search,
+            fournisseur,
+            max_qte: maxQte,
+            sort_by: sortBy,
+            ...o, // les overrides écrasent l'état précédent
+        };
+        // Nettoyer les paramètres vides pour une URL propre
+        Object.keys(params).forEach((k) => {
+            if (
+                params[k] === '' ||
+                params[k] === null ||
+                params[k] === undefined
+            ) {
+                delete params[k];
+            }
+        });
+        router.get(route('stocks.index'), params, {
+            preserveState: true,
+            replace: true,
+        });
+    };
 
     const startEdit = (s: any) => {
         setEditingCode(s.Code);
@@ -82,29 +141,25 @@ export default function Index({
     const saveEdit = async (Code: string) => {
         setSaving(true);
         try {
-            const csrf = getCsrfToken();
-            const body = JSON.stringify({
-                Code,
-                quantite: parseFloat(editQte) || 0,
-            });
-
             const res = await fetch('/stocks/update', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Accept: 'application/json',
-                    'X-XSRF-TOKEN': csrf,
+                    'X-XSRF-TOKEN': getCsrfToken(),
                     'X-Requested-With': 'XMLHttpRequest',
                 },
-                body,
+                body: JSON.stringify({
+                    Code,
+                    quantite: parseFloat(editQte) || 0,
+                }),
             });
-
             const text = await res.text();
             let json: any = {};
             try {
                 json = JSON.parse(text);
             } catch {
-                console.error('Réponse non-JSON:', text);
+                console.error('Non-JSON:', text);
             }
 
             if (res.ok && json.success) {
@@ -113,38 +168,35 @@ export default function Index({
                 setEditingCode(null);
                 router.reload({ only: ['stocks', 'stats'] });
             } else {
-                console.error('Erreur update stock:', res.status, text);
                 alert(json.message ?? `Erreur ${res.status}`);
             }
-        } catch (e) {
-            console.error('Erreur réseau saveEdit:', e);
+        } catch {
             alert('Erreur réseau — vérifiez la console (F12).');
         } finally {
             setSaving(false);
         }
     };
 
-    // ── Export Excel : navigation directe (le serveur renvoie un fichier)
     const handleExportExcel = () => {
-        const url = buildExportUrl(
+        window.location.href = buildExportUrl(
             '/stocks/export',
             search,
             fournisseur,
             maxQte,
         );
-        window.location.href = url;
     };
 
     const rows = Array.isArray(stocks?.data) ? stocks.data : [];
     const links = Array.isArray(stocks?.links) ? stocks.links : [];
 
+    // FIX : le filtre quantité est toujours visible (plus conditionnel au fournisseur)
     const hasFilters = !!(search || fournisseur || maxQte);
 
     return (
         <AppLayout>
-            <Head title="Stocks " />
+            <Head title="Stocks" />
             <div className="min-h-screen bg-gray-50 p-6 dark:bg-gray-900">
-                {/* ── TITRE + BOUTONS EXPORT ── */}
+                {/* ── TITRE + EXPORT ── */}
                 <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
                     <div>
                         <h1 className="text-2xl font-bold text-gray-800 dark:text-white">
@@ -155,8 +207,6 @@ export default function Index({
                             manuellement
                         </p>
                     </div>
-
-                    {/* Boutons export */}
                     <div className="flex items-center gap-2">
                         {hasFilters && (
                             <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
@@ -174,48 +224,53 @@ export default function Index({
                     </div>
                 </div>
 
-                {/* Bandeau sync */}
-                {sync_en_cours && (
+                {/* ── BANDEAU SYNC ── */}
+                {syncStatus === 'running' && (
                     <div className="mb-4 flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-300">
                         <RefreshCw
                             size={14}
                             className="shrink-0 animate-spin"
                         />
                         <span>Synchronisation du stock en cours…</span>
-                        <button
-                            onClick={() =>
-                                router.reload({
-                                    only: ['stocks', 'stats', 'sync_en_cours'],
-                                })
-                            }
-                            className="ml-auto rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-semibold hover:bg-blue-100"
-                        >
-                            Rafraîchir
-                        </button>
+                        <span className="ml-auto text-xs opacity-60">
+                            Mise à jour automatique toutes les 5 s
+                        </span>
+                    </div>
+                )}
+                {syncStatus === 'done' && sync_en_cours && (
+                    <div className="mb-4 flex items-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300">
+                        <CheckCircle size={14} className="shrink-0" />
+                        <span>Stock synchronisé avec succès.</span>
                     </div>
                 )}
 
-                {/* Stats — total_articles = catalogue complet */}
+                {/* ── STATS ── */}
                 <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {/* Carte 1 : Total articles */}
                     <StatCard
                         icon={<Boxes size={18} />}
                         label="Total articles"
                         value={fmt(stats?.total_articles)}
                         color="bordeaux"
-                        tooltip="Tous les articles du catalogue"
+                        tooltip="Nombre d'articles dans le catalogue"
                     />
+                    {/* Carte 2 : Quantité totale en stock */}
                     <StatCard
                         icon={<PackageSearch size={18} />}
-                        label="Valeur totale"
-                        value={`${fmt(stats?.total_valeur, 0)} Ar`}
+                        label="Qté totale stock"
+                        value={fmt(stats?.total_qte_stock, 0)}
                         color="teal"
+                        tooltip="Somme de toutes les quantités en stock"
                     />
+                    {/* Carte 3 : Ruptures */}
                     <StatCard
                         icon={<TriangleAlert size={18} />}
                         label="Ruptures"
                         value={fmt(stats?.ruptures)}
                         color="red"
+                        tooltip="Articles avec quantité ≤ 0"
                     />
+                    {/* Carte 4 : Fournisseurs */}
                     <StatCard
                         icon={<Users size={18} />}
                         label="Fournisseurs"
@@ -224,35 +279,100 @@ export default function Index({
                     />
                 </div>
 
-                {/* Filtres */}
-                <div className="mb-4 flex flex-wrap gap-3">
-                    <div className="min-w-50 flex-1">
-                        <SearchInput
-                            value={search}
-                            onChange={(v) => {
-                                setSearch(v);
-                                apply({ search: v });
+                {/* Valeur totale du stock en petit sous les stats */}
+                <div className="mb-4 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-600 shadow-sm dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                    Valeur totale du stock :{' '}
+                    <span className="font-bold text-gray-800 dark:text-white">
+                        {fmt(stats?.total_valeur, 2)} Ar
+                    </span>
+                </div>
+
+                {/* ── FILTRES ── */}
+                <div className="mb-4 space-y-2">
+                    {/* Ligne 1 : Recherche + Fournisseur + Tri */}
+                    <div className="flex flex-wrap gap-3">
+                        <div className="min-w-50 flex-1">
+                            <SearchInput
+                                value={search}
+                                onChange={(v) => {
+                                    setSearch(v);
+                                    apply({ search: v });
+                                }}
+                                placeholder="Rechercher code, article, fournisseur…"
+                            />
+                        </div>
+                        <select
+                            value={fournisseur}
+                            onChange={(e) => {
+                                const val = e.target.value;
+                                setFournisseur(val);
+                                apply({ fournisseur: val });
                             }}
-                            placeholder="Rechercher code, article, fournisseur…"
-                        />
-                    </div>
-                    <select
-                        value={fournisseur}
-                        onChange={(e) => {
-                            setFournisseur(e.target.value);
-                            apply({ fournisseur: e.target.value });
-                        }}
-                        className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-[#7a1a2e] focus:ring-2 focus:ring-[#7a1a2e]/30 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-white"
-                    >
-                        <option value="">Tous les fournisseurs</option>
-                        {(fournisseursList ?? []).map((f: string) => (
-                            <option key={f} value={f}>
-                                {f}
+                            className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-[#7a1a2e] focus:ring-2 focus:ring-[#7a1a2e]/30 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-white"
+                        >
+                            <option value="">Tous les fournisseurs</option>
+                            {(fournisseursList ?? []).map((f: string) => (
+                                <option key={f} value={f}>
+                                    {f}
+                                </option>
+                            ))}
+                        </select>
+                        <select
+                            value={sortBy}
+                            onChange={(e) => {
+                                setSortBy(e.target.value);
+                                apply({ sort_by: e.target.value });
+                            }}
+                            className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-[#7a1a2e] focus:ring-2 focus:ring-[#7a1a2e]/30 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-white"
+                        >
+                            <option value="Code">Trier par Code</option>
+                            <option value="fournisseur">
+                                Trier par Fournisseur
                             </option>
-                        ))}
-                    </select>
-                    <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-                        <span className="text-sm text-gray-400">Qté &lt;</span>
+                            <option value="Liblong">
+                                Trier par Désignation
+                            </option>
+                            <option value="QuantiteStock">
+                                Trier par Quantité
+                            </option>
+                            <option value="PrixTotal">Trier par Valeur</option>
+                        </select>
+                        {hasFilters && (
+                            <button
+                                onClick={() => {
+                                    setSearch('');
+                                    setFournisseur('');
+                                    setMaxQte('');
+                                    setSortBy('Code');
+                                    apply({
+                                        search: '',
+                                        fournisseur: '',
+                                        max_qte: '',
+                                        sort_by: 'Code',
+                                    });
+                                }}
+                                className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-xs font-semibold text-gray-500 shadow-sm hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400"
+                            >
+                                ✕ Effacer filtres
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Ligne 2 : Filtre quantité — toujours visible, combinable avec tout */}
+                    <div
+                        className={`flex items-center gap-3 rounded-xl border px-4 py-2.5 transition-colors ${
+                            maxQte
+                                ? 'border-[#7a1a2e]/40 bg-[#7a1a2e]/5 dark:border-[#7a1a2e]/50 dark:bg-[#7a1a2e]/10'
+                                : 'border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800'
+                        }`}
+                    >
+                        <span className="text-xs font-semibold tracking-wide text-gray-400 uppercase dark:text-gray-500">
+                            Filtrer par quantité
+                        </span>
+                        <div className="h-4 w-px bg-gray-200 dark:bg-gray-600" />
+                        <label className="text-sm text-gray-500 dark:text-gray-400">
+                            Qté inférieure à
+                        </label>
                         <input
                             type="number"
                             min="0"
@@ -261,31 +381,39 @@ export default function Index({
                                 setMaxQte(e.target.value);
                                 apply({ max_qte: e.target.value });
                             }}
-                            placeholder="Valeur…"
-                            className="w-24 bg-transparent py-2.5 text-sm focus:outline-none dark:text-white"
+                            placeholder="ex: 10"
+                            className={`w-28 rounded-lg border px-3 py-1.5 text-sm focus:ring-2 focus:outline-none dark:bg-gray-700 dark:text-white ${
+                                maxQte
+                                    ? 'border-[#7a1a2e]/50 focus:ring-[#7a1a2e]/30'
+                                    : 'border-gray-200 focus:ring-[#7a1a2e]/20 dark:border-gray-600'
+                            }`}
                         />
+                        {/* Contexte actif : montre avec quoi on combine */}
+                        {maxQte && (
+                            <span className="ml-1 text-xs text-[#7a1a2e] dark:text-red-400">
+                                {fournisseur
+                                    ? `→ fournisseur « ${fournisseur} » avec qté < ${maxQte}`
+                                    : search
+                                      ? `→ recherche « ${search} » avec qté < ${maxQte}`
+                                      : `→ tous les articles avec qté < ${maxQte}`}
+                            </span>
+                        )}
+                        {maxQte && (
+                            <button
+                                onClick={() => {
+                                    setMaxQte('');
+                                    apply({ max_qte: '' });
+                                }}
+                                className="ml-auto text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                                title="Effacer le filtre quantité"
+                            >
+                                ✕
+                            </button>
+                        )}
                     </div>
-
-                    {/* Reset filtres */}
-                    {hasFilters && (
-                        <button
-                            onClick={() => {
-                                setSearch('');
-                                setFournisseur('');
-                                setMaxQte('');
-                                apply({
-                                    search: '',
-                                    fournisseur: '',
-                                    max_qte: '',
-                                });
-                            }}
-                            className="rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-xs font-semibold text-gray-500 shadow-sm hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400"
-                        >
-                            ✕ Effacer filtres
-                        </button>
-                    )}
                 </div>
 
+                {/* ── TABLE ── */}
                 <DataTable
                     headers={[
                         { label: 'Code' },
@@ -323,7 +451,6 @@ export default function Index({
                                                 <input
                                                     ref={inputRef}
                                                     type="number"
-                                                    min="0"
                                                     value={editQte}
                                                     onChange={(e) =>
                                                         setEditQte(
@@ -362,9 +489,13 @@ export default function Index({
                                             <span
                                                 onClick={() => startEdit(s)}
                                                 title="Cliquer pour modifier"
-                                                className={`cursor-pointer rounded-lg px-2 py-1 font-bold transition-colors hover:bg-[#7a1a2e]/10 hover:text-[#7a1a2e] ${isRupture ? 'text-red-600 dark:text-red-400' : 'text-gray-800 dark:text-gray-200'}`}
+                                                className={`cursor-pointer rounded-lg px-2 py-1 font-bold transition-colors hover:bg-[#7a1a2e]/10 hover:text-[#7a1a2e] ${
+                                                    isRupture
+                                                        ? 'text-red-600 dark:text-red-400'
+                                                        : 'text-gray-800 dark:text-gray-200'
+                                                }`}
                                             >
-                                                {fmt(s.QuantiteStock)}
+                                                {fmt(s.QuantiteStock, 3)}
                                             </span>
                                         )}
                                     </td>

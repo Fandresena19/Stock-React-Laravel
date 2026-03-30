@@ -71,8 +71,8 @@ export default function Dashboard({
                     />
                     <StatCard
                         icon={<PackageSearch size={18} />}
-                        label="Valeur Stock"
-                        value={fmtFull(stats?.valeur_stock) + ' Ar'}
+                        label="Quanttité stock"
+                        value={fmtFull(stats?.total_qte_stock, 0)}
                         color="teal"
                     />
                     <StatCard

@@ -57,6 +57,7 @@ class AchatController extends Controller
         )
             ->when($date, fn($q) => $q->whereDate('date', $date))
             ->orderBy('date', 'desc')
+            ->orderBy('Code')
             ->paginate(20)
             ->through(fn($a) => [
                 'id'            => null, // pas d'id en base

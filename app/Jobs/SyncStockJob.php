@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Log;
@@ -14,218 +15,300 @@ use Carbon\Carbon;
 
 /**
  * SyncStockJob
- * ─────────────────────────────────────────────────────────────────────────────
- * Synchronise le stock avec les mouvements d'hier uniquement.
+ * ═══════════════════════════════════════════════════════════════════════════
  *
- * E1 est char(30) avec virgule française ("0,174") →
- *   converti via CAST(REPLACE(E1, ',', '.') AS DECIMAL(10,3))
+ * Ce job fait 2 choses dans l'ordre :
+ *
+ *  1. syncArticlesManquants()
+ *     → Insère dans stocks les articles présents dans la table articles
+ *       mais absents de stocks (nouveaux articles).
+ *     → Resynchronise Liblong et fournisseur pour tous les articles.
+ *
+ *  2. soustraireVentes($hier)
+ *     → Soustrait les quantités vendues (table servmcljournal{Ymd}) du stock.
+ *     → PrixTotal recalculé en 2 UPDATE séparés pour éviter le bug MySQL
+ *       où le CASE est évalué deux fois avec l'ancienne valeur.
+ *
+ * NOTE : Les ACHATS ne sont PAS traités ici.
+ *   Ils sont appliqués en temps réel par VenteStockService::ajusterStockBulkAvecPrix()
+ *   appelé dans AchatController après chaque import.
+ *   → Pas de double comptage.
+ *
+ * PROTECTION CONTRE LES DOUBLONS :
+ *   "ventes_sync_{Ymd}" en cache → ventes de cette date déjà soustraites.
+ *   Le job refuse de tourner si cette clé existe déjà.
+ *
+ * UTILISATION :
+ *   SyncStockJob::dispatch();               // → Carbon::yesterday()
+ *   SyncStockJob::dispatch('2026-03-22');   // → rejoue une date précise
  *
  * CONNEXIONS :
- *   mysql        → stocks, achats, articles
- *   mysql_ventes → servmcljournal* (tables ventes)
- * ─────────────────────────────────────────────────────────────────────────────
+ *   mysql        → stocks, articles
+ *   mysql_ventes → servmcljournal{Ymd}
+ * ═══════════════════════════════════════════════════════════════════════════
  */
 class SyncStockJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries   = 1;
-    public int $timeout = 300;
+    public int $timeout = 600;
 
-    private const DB_VENTES = 'mysql_ventes';
-    private const E1_DECIMAL = "CAST(REPLACE(E1, ',', '.') AS DECIMAL(10,3))";
+    private const DB_VENTES          = 'mysql_ventes';
+    private const LOCK_KEY           = 'sync_stock_running';
+    private const LOCK_TTL           = 660;
+    private const VENTES_DONE_PREFIX = 'ventes_sync_';
 
-    public function handle(): void
+    private ?string $dateOverride;
+
+    public function __construct(?string $date = null)
     {
-        $hier = Carbon::yesterday();
-        Log::info('SyncStockJob: démarrage pour ' . $hier->format('d/m/Y'));
-
-        $this->syncArticlesManquants();
-        $this->syncMouvementsHier($hier);
-        $this->syncPrixU($hier);
-
-        cache()->put('sync_done', true, now()->addHours(6));
-        cache()->forget('sync_job_dispatched');
-
-        Log::info('SyncStockJob: terminé.');
+        $this->dateOverride = $date;
     }
 
     // =========================================================================
-    // 1. Articles manquants dans stocks
+    // HANDLE
+    // =========================================================================
+
+    public function handle(): void
+    {
+        // ── Guard : un seul job à la fois ─────────────────────────────────
+        if (Cache::get(self::LOCK_KEY)) {
+            Log::warning('SyncStockJob: déjà en cours, abandon.');
+            return;
+        }
+        Cache::put(self::LOCK_KEY, true, self::LOCK_TTL);
+
+        try {
+            $hier     = $this->dateOverride
+                ? Carbon::parse($this->dateOverride)
+                : Carbon::yesterday();
+            $hierYmd  = $hier->format('Ymd');
+            $cleDone  = self::VENTES_DONE_PREFIX . $hierYmd;
+
+            // ── Guard : ventes de cette date déjà appliquées ──────────────
+            if (Cache::get($cleDone)) {
+                Log::info("SyncStockJob: ventes du {$hier->format('d/m/Y')} déjà appliquées.");
+                return;
+            }
+
+            Log::info('SyncStockJob: démarrage pour ' . $hier->format('d/m/Y'));
+
+            // ── Étape 1 : articles manquants ──────────────────────────────
+            $this->syncArticlesManquants();
+
+            // ── Étape 2 : soustraire les ventes ───────────────────────────
+            $nb = $this->soustraireVentes($hier);
+
+            if ($nb > 0) {
+                Cache::put($cleDone, true, now()->addDays(400));
+                Cache::put('sync_done_' . $hierYmd, true, now()->addDays(400));
+                Log::info("SyncStockJob: {$nb} articles mis à jour pour le {$hier->format('d/m/Y')}.");
+            } else {
+                // Aucune vente mais on marque quand même pour ne pas repasser
+                Cache::put($cleDone, true, now()->addDays(400));
+                Cache::put('sync_done_' . $hierYmd, true, now()->addDays(400));
+                Log::info("SyncStockJob: aucune vente pour le {$hier->format('d/m/Y')}.");
+            }
+
+            Cache::forget('sync_dispatched_' . $hierYmd);
+            Log::info('SyncStockJob: terminé.');
+        } catch (\Throwable $e) {
+            Log::error('SyncStockJob exception: ' . $e->getMessage());
+            throw $e;
+        } finally {
+            Cache::forget(self::LOCK_KEY);
+        }
+    }
+
+    // =========================================================================
+    // ÉTAPE 1 : Articles manquants + resync Liblong / fournisseur
+    //
+    // Chunks de 500 → pas de verrou global sur stocks (évite SQLSTATE 1205).
     // =========================================================================
 
     private function syncArticlesManquants(): void
     {
         try {
-            $missing = DB::table('articles')
-                ->leftJoin('stocks', 'articles.Code', '=', 'stocks.Code')
-                ->whereNull('stocks.Code')
-                ->select('articles.Code', 'articles.Liblong', 'articles.fournisseur')
-                ->get();
+            DB::statement('SET SESSION innodb_lock_wait_timeout = 120');
 
-            if ($missing->isNotEmpty()) {
-                foreach ($missing->chunk(500) as $chunk) {
-                    DB::table('stocks')->insertOrIgnore(
-                        $chunk->map(fn($a) => [
-                            'Code'          => $a->Code,
-                            'Liblong'       => $a->Liblong,
-                            'fournisseur'   => $a->fournisseur,
-                            'QuantiteStock' => 0,
-                            'PrixU'         => 0,
-                            'PrixTotal'     => 0,
-                        ])->toArray()
-                    );
-                }
-                Log::info('SyncStockJob: ' . $missing->count() . ' article(s) insérés.');
-            }
+            $chunkSize = 500;
+            $nbIns     = 0;
+            $nbUpd     = 0;
 
-            DB::statement("
-                UPDATE stocks s
-                INNER JOIN articles a
-                    ON s.Code COLLATE utf8mb3_unicode_ci = a.Code COLLATE utf8mb3_unicode_ci
-                SET s.Liblong     = a.Liblong,
-                    s.fournisseur = a.fournisseur
-            ");
+            // ── INSERT articles absents de stocks ─────────────────────────
+            DB::table('articles')
+                ->orderBy('Code')
+                ->chunk($chunkSize, function ($articles) use (&$nbIns) {
+                    $codes = $articles->pluck('Code')->filter()->all();
+                    if (empty($codes)) return;
+
+                    // Codes déjà présents → on ne les réinsère pas
+                    $existants = DB::table('stocks')
+                        ->whereIn('Code', $codes)
+                        ->pluck('Code')
+                        ->filter()
+                        ->flip()
+                        ->all();
+
+                    $inserts = [];
+                    foreach ($articles as $a) {
+                        if ($a->Code === null) continue;
+                        if (!isset($existants[$a->Code])) {
+                            $inserts[] = [
+                                'Code'          => $a->Code,
+                                'Liblong'       => $a->Liblong       ?? '',
+                                'fournisseur'   => $a->fournisseur   ?? null,
+                                'QuantiteStock' => 0,
+                                'PrixU'         => 0,
+                                'PrixTotal'     => 0,
+                            ];
+                        }
+                    }
+
+                    if (!empty($inserts)) {
+                        DB::table('stocks')->insertOrIgnore($inserts);
+                        $nbIns += count($inserts);
+                    }
+                });
+
+            Log::info("SyncStockJob::syncArticles: {$nbIns} articles insérés.");
+
+            // ── UPDATE Liblong + fournisseur — bulk CASE WHEN ────────────
+            // 1 seule requête par chunk de 500 au lieu de 27 000 UPDATE individuels
+            DB::table('articles')
+                ->orderBy('Code')
+                ->chunk($chunkSize, function ($articles) use (&$nbUpd) {
+                    $caseLiblong     = 'CASE `Code`';
+                    $caseFournisseur = 'CASE `Code`';
+                    $codes           = [];
+
+                    foreach ($articles as $a) {
+                        if ($a->Code === null) continue;
+                        $q                = DB::getPdo()->quote($a->Code);
+                        $liblong          = DB::getPdo()->quote($a->Liblong     ?? '');
+                        $fournisseur      = $a->fournisseur !== null
+                            ? DB::getPdo()->quote($a->fournisseur)
+                            : 'NULL';
+
+                        $caseLiblong     .= " WHEN {$q} THEN {$liblong}";
+                        $caseFournisseur .= " WHEN {$q} THEN {$fournisseur}";
+                        $codes[]          = $q;
+                        $nbUpd++;
+                    }
+
+                    if (empty($codes)) return;
+
+                    DB::statement('
+                        UPDATE stocks
+                        SET Liblong     = ' . $caseLiblong     . ' END,
+                            fournisseur = ' . $caseFournisseur . ' END
+                        WHERE `Code` IN (' . implode(',', $codes) . ')
+                    ');
+                });
+
+            Log::info("SyncStockJob::syncArticles: {$nbUpd} libellés synchronisés.");
         } catch (\Throwable $e) {
             Log::error('SyncStockJob::syncArticles: ' . $e->getMessage());
         }
     }
 
     // =========================================================================
-    // 2. Ajustement incrémental d'hier
-    //    QuantiteStock += achat_hier - vente_hier (E1 converti)
+    // ÉTAPE 2 : Soustraction des ventes
+    //
+    // Lit servmcljournal{Ymd}, somme E1 par article.
+    // E1 est un CHAR avec virgule française ("0,174" ou "-2").
+    // Valeurs négatives = retours → la soustraction augmente le stock.
+    //
+    // DEUX UPDATE SÉPARÉS pour éviter le bug MySQL :
+    //   Dans un seul UPDATE SET a = CASE..., b = CASE... * a,
+    //   MySQL évalue les deux CASE indépendamment avec l'ANCIENNE valeur de a.
+    //   → PrixTotal utilisait l'ancienne QuantiteStock au lieu de la nouvelle.
+    //
+    //   Fix : UPDATE 1 → QuantiteStock
+    //         UPDATE 2 → PrixTotal = nouvelle QuantiteStock * PrixU
     // =========================================================================
 
-    private function syncMouvementsHier(Carbon $hier): void
+    private function soustraireVentes(Carbon $hier): int
     {
-        try {
-            $hierDate  = $hier->format('Y-m-d');
-            $tableName = 'servmcljournal' . $hier->format('Ymd');
-            $e1        = self::E1_DECIMAL;
+        $tableName = 'servmcljournal' . $hier->format('Ymd');
 
-            // Achats d'hier
-            $achatsHier = DB::table('achats')
-                ->whereDate('date', $hierDate)
-                ->selectRaw('Code, COALESCE(SUM(QuantiteAchat), 0) AS total_achat')
-                ->groupBy('Code')
-                ->get()
-                ->keyBy('Code');
-
-            Log::info('SyncStockJob: ' . $achatsHier->count() . ' article(s) achetés hier.');
-
-            // Ventes d'hier — E1 converti en DECIMAL
-            $ventesHier = collect();
-            $dbVentes   = DB::connection(self::DB_VENTES);
-
-            if (Schema::connection(self::DB_VENTES)->hasTable($tableName)) {
-                $rows = $dbVentes->select("
-                    SELECT idcint AS Code,
-                           COALESCE(SUM({$e1}), 0) AS total_vente
-                    FROM `{$tableName}`
-                    GROUP BY idcint
-                ");
-                $ventesHier = collect($rows)->keyBy('Code');
-                Log::info('SyncStockJob: ' . $ventesHier->count() . ' article(s) vendus hier (' . $tableName . ').');
-            } else {
-                Log::info('SyncStockJob: table ' . $tableName . ' absente — ventes = 0.');
-            }
-
-            if ($achatsHier->isEmpty() && $ventesHier->isEmpty()) {
-                Log::info('SyncStockJob: aucun mouvement hier.');
-                return;
-            }
-
-            // Tous les codes concernés hier
-            $codes = $achatsHier->keys()
-                ->merge($ventesHier->keys())
-                ->unique()
-                ->values();
-
-            // Bulk UPDATE par chunks de 500
-            foreach ($codes->chunk(500) as $chunk) {
-                $deltaCase = 'CASE `Code`';
-                $codesSql  = [];
-
-                foreach ($chunk as $code) {
-                    $achat = isset($achatsHier[$code]) ? (float) $achatsHier[$code]->total_achat : 0.0;
-                    $vente = isset($ventesHier[$code]) ? (float) $ventesHier[$code]->total_vente  : 0.0;
-                    $delta = $achat - $vente;
-                    $q     = DB::getPdo()->quote($code);
-
-                    $deltaCase  .= " WHEN {$q} THEN QuantiteStock + {$delta}";
-                    $codesSql[] = $q;
-                }
-
-                if (empty($codesSql)) continue;
-
-                DB::statement('
-                    UPDATE stocks
-                    SET QuantiteStock = ' . $deltaCase . ' END,
-                        PrixTotal     = (' . $deltaCase . ' END) * PrixU
-                    WHERE `Code` IN (' . implode(',', $codesSql) . ')
-                ');
-            }
-
-            Log::info('SyncStockJob: ' . $codes->count() . ' article(s) mis à jour.');
-        } catch (\Throwable $e) {
-            Log::error('SyncStockJob::syncMouvementsHier: ' . $e->getMessage());
+        if (!Schema::connection(self::DB_VENTES)->hasTable($tableName)) {
+            Log::warning("SyncStockJob: table {$tableName} introuvable.");
+            return 0;
         }
+
+        // Agréger les ventes par article
+        $ventes = DB::connection(self::DB_VENTES)
+            ->table($tableName)
+            ->selectRaw("
+                CAST(idcint AS UNSIGNED) AS Code,
+                SUM(
+                    CASE
+                        WHEN TRIM(E1) REGEXP '^-?[0-9]+([,\\.][0-9]+)?$'
+                        THEN CAST(REPLACE(TRIM(E1), ',', '.') AS DECIMAL(10,3))
+                        ELSE 0
+                    END
+                ) AS total_vendu
+            ")
+            ->groupByRaw('CAST(idcint AS UNSIGNED)')
+            ->get()  // pas de HAVING → on traite TOUS les articles vendus, même retours nets
+            ->keyBy('Code');
+
+        if ($ventes->isEmpty()) {
+            Log::info('SyncStockJob::soustraireVentes: table vide ou aucun idcint valide.');
+            return 0;
+        }
+
+        $nb = 0;
+
+        foreach ($ventes->chunk(500) as $chunk) {
+            $caseQte = 'CASE CAST(`Code` AS UNSIGNED)';
+            $inList  = [];
+
+            foreach ($chunk as $code => $row) {
+                $totalVendu = round((float) $row->total_vendu, 3);
+                $codeInt    = (int) $code;
+
+                $caseQte .= " WHEN {$codeInt} THEN QuantiteStock - ({$totalVendu})";
+                $inList[] = $codeInt;
+            }
+
+            if (empty($inList)) continue;
+
+            $in = implode(',', $inList);
+
+            // UPDATE 1 : nouvelle QuantiteStock
+            DB::statement("
+                UPDATE stocks
+                SET QuantiteStock = ROUND({$caseQte} END, 3)
+                WHERE CAST(`Code` AS UNSIGNED) IN ({$in})
+            ");
+
+            // UPDATE 2 : PrixTotal avec la NOUVELLE QuantiteStock déjà en base
+            DB::statement("
+                UPDATE stocks
+                SET PrixTotal = ROUND(QuantiteStock * PrixU, 2)
+                WHERE CAST(`Code` AS UNSIGNED) IN ({$in})
+            ");
+
+            $nb += count($inList);
+        }
+
+        return $nb;
     }
 
     // =========================================================================
-    // 3. PrixU = prix du dernier achat d'hier
-    //    PrixTotal recalculé en SQL pur — pas de doublon
+    // Échec
     // =========================================================================
-
-    private function syncPrixU(Carbon $hier): void
-    {
-        try {
-            $hierDate = $hier->format('Y-m-d');
-
-            $prixHier = DB::table('achats')
-                ->whereDate('date', $hierDate)
-                ->selectRaw('Code, MAX(PrixU) AS PrixU')
-                ->groupBy('Code')
-                ->get()
-                ->keyBy('Code');
-
-            if ($prixHier->isEmpty()) {
-                Log::info('SyncStockJob::syncPrixU: aucun achat hier.');
-                return;
-            }
-
-            foreach ($prixHier->chunk(500) as $chunk) {
-                $prixCase = 'CASE `Code`';
-                $codes    = [];
-
-                foreach ($chunk as $code => $row) {
-                    $prixU     = (float) $row->PrixU;
-                    $q         = DB::getPdo()->quote($code);
-                    $prixCase .= " WHEN {$q} THEN {$prixU}";
-                    $codes[]   = $q;
-                }
-
-                if (empty($codes)) continue;
-
-                // PrixTotal = QuantiteStock * nouveauPrixU en SQL pur
-                DB::statement('
-                    UPDATE stocks
-                    SET PrixU     = ' . $prixCase . ' END,
-                        PrixTotal = QuantiteStock * (' . $prixCase . ' END)
-                    WHERE `Code` IN (' . implode(',', $codes) . ')
-                ');
-            }
-
-            Log::info('SyncStockJob::syncPrixU: ' . $prixHier->count() . ' prix mis à jour.');
-        } catch (\Throwable $e) {
-            Log::error('SyncStockJob::syncPrixU: ' . $e->getMessage());
-        }
-    }
 
     public function failed(\Throwable $exception): void
     {
-        cache()->forget('sync_job_dispatched');
-        cache()->forget('sync_done');
+        Cache::forget(self::LOCK_KEY);
+        $hierYmd = $this->dateOverride
+            ? Carbon::parse($this->dateOverride)->format('Ymd')
+            : Carbon::yesterday()->format('Ymd');
+        Cache::forget('sync_dispatched_' . $hierYmd);
         Log::error('SyncStockJob échoué: ' . $exception->getMessage());
     }
 }

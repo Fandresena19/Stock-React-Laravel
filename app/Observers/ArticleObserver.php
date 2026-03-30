@@ -3,38 +3,36 @@
 namespace App\Observers;
 
 use App\Models\Article;
-use App\Models\Stocks;
+use Illuminate\Support\Facades\DB;
 
 class ArticleObserver
 {
-    // Nouvel article → créer ligne dans stocks avec quantité 0
+    // Nouvel article → INSERT direct dans stocks (rapide, pas d'Eloquent)
     public function created(Article $article): void
     {
-        Stocks::firstOrCreate(
-            ['Code' => $article->Code],
-            [
-                'Liblong'       => $article->Liblong,
-                'fournisseur'   => $article->fournisseur,
-                'QuantiteStock' => 0,
-                'PrixU'         => 0,
-                'PrixTotal'     => 0,
-            ]
-        );
+        DB::table('stocks')->insertOrIgnore([
+            'Code'          => $article->Code,
+            'Liblong'       => $article->Liblong,
+            'fournisseur'   => $article->fournisseur,
+            'QuantiteStock' => 0,
+            'PrixU'         => 0,
+            'PrixTotal'     => 0,
+        ]);
     }
 
-    // Article modifié → sync Liblong + fournisseur dans stocks
+    // Article modifié → UPDATE direct (rapide)
     public function updated(Article $article): void
     {
-        Stocks::where('Code', $article->Code)->update([
+        DB::table('stocks')->where('Code', $article->Code)->update([
             'Liblong'     => $article->Liblong,
             'fournisseur' => $article->fournisseur,
         ]);
     }
 
-    public function deleted(Article $article): void
-    {
-        // Conserver le stock pour l'historique
-        // Décommenter pour supprimer :
-        // Stocks::where('Code', $article->Code)->delete();
-    }
+    // Article supprimé → NE PAS supprimer le stock (historique conservé)
+    // Décommenter pour supprimer le stock aussi :
+    // public function deleted(Article $article): void
+    // {
+    //     DB::table('stocks')->where('Code', $article->Code)->delete();
+    // }
 }

@@ -15,14 +15,26 @@ use PhpOffice\PhpSpreadsheet\Style\Alignment;
 
 /**
  * StockExport
- * Utilise FromQuery + chunk pour éviter les erreurs mémoire sur 27 000+ articles.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Anti-timeout sur 30 000+ articles :
+ *
+ *   • FromQuery    → Maatwebsite construit le fichier en streaming sans tout
+ *                    charger en mémoire.
+ *   • WithChunkReading (chunkSize 500) → lecture par paquets de 500 lignes.
+ *   • ShouldAutoSize   → largeur colonnes automatique (coût négligeable).
+ *   • Pas de WithCustomQuerySize séparé — chunkSize() suffit avec FromQuery.
+ *
+ * Pour les exports très volumineux (> 50 000 lignes), préférer le driver
+ * "Csv" ou une file d'attente (QueuedExport / StoreExport + notification).
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 class StockExport implements
     FromQuery,
     WithHeadings,
     WithMapping,
     WithStyles,
-    ShouldAutoSize
+    ShouldAutoSize,
+    WithChunkReading
 {
     private string $search;
     private string $fournisseur;
@@ -38,22 +50,32 @@ class StockExport implements
         $this->maxQte      = $maxQte;
     }
 
-    // FromQuery — Maatwebsite gère le chunking automatiquement
+    // ── Requête — Maatwebsite gère les chunks automatiquement ─────────────────
     public function query()
     {
         return Stocks::when(
             $this->search,
             fn($q) =>
-            $q->where('Code',         'like', "%{$this->search}%")
-                ->orWhere('Liblong',    'like', "%{$this->search}%")
-                ->orWhere('fournisseur', 'like', "%{$this->search}%")
+            $q->where('Code',          'like', "%{$this->search}%")
+                ->orWhere('Liblong',      'like', "%{$this->search}%")
+                ->orWhere('fournisseur',  'like', "%{$this->search}%")
         )
             ->when($this->fournisseur, fn($q) => $q->where('fournisseur', $this->fournisseur))
-            ->when($this->maxQte !== '', fn($q) => $q->where('QuantiteStock', '<', (float) $this->maxQte))
+            ->when(
+                $this->maxQte !== '',
+                fn($q) => $q->where('QuantiteStock', '<', (float) $this->maxQte)
+            )
             ->orderBy('Code')
             ->select('Code', 'Liblong', 'fournisseur', 'QuantiteStock', 'PrixU', 'PrixTotal');
     }
 
+    // ── Taille des chunks de lecture (500 lignes × N colonnes légères) ────────
+    public function chunkSize(): int
+    {
+        return 500;
+    }
+
+    // ── En-têtes ──────────────────────────────────────────────────────────────
     public function headings(): array
     {
         return [
@@ -66,6 +88,7 @@ class StockExport implements
         ];
     }
 
+    // ── Mapping ligne par ligne ───────────────────────────────────────────────
     public function map($stock): array
     {
         return [
@@ -78,6 +101,7 @@ class StockExport implements
         ];
     }
 
+    // ── Style ligne d'en-tête (rouge bordeaux #7a1a2e, texte blanc) ──────────
     public function styles(Worksheet $sheet): array
     {
         return [
@@ -87,10 +111,5 @@ class StockExport implements
                 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
             ],
         ];
-    }
-
-    public function chunkSize(): int
-    {
-        return 500;
     }
 }

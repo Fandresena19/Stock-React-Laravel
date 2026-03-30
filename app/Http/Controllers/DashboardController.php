@@ -22,6 +22,7 @@ class DashboardController extends Controller
 
         $stats = [
             'total_articles'  => DB::table('articles')->count(),
+            'total_qte_stock'  => Stocks::sum('QuantiteStock'),   // ← quantité totale
             'valeur_stock'    => (float) Stocks::sum('PrixTotal'),
             'ruptures'        => Stocks::where('QuantiteStock', '<=', 0)->count(),
             'stock_faible'    => Stocks::where('QuantiteStock', '>', 0)

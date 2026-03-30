@@ -21,23 +21,27 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     Route::resource('fournisseurs', FournisseurController::class);
 
-    //Achat
+    // Achats
     Route::prefix('achats')->name('achats.')->group(function () {
-        Route::get('/',            [AchatController::class, 'index'])->name('index');
-        Route::post('/import',     [AchatController::class, 'import'])->name('import');
+        Route::get('/',             [AchatController::class, 'index'])->name('index');
+        Route::post('/import',      [AchatController::class, 'import'])->name('import');
         Route::post('/import-auto', [AchatController::class, 'importAuto'])->name('import-auto');
-        Route::delete('/{id}',     [AchatController::class, 'destroy'])->name('destroy');
+        Route::delete('/{id}',      [AchatController::class, 'destroy'])->name('destroy');
     });
 
     // Stocks
-    Route::get('/stocks',              [StockController::class, 'index'])->name('stocks.index');
-    Route::post('/stocks/update',      [StockController::class, 'update'])->name('stocks.update');
-    Route::post('/stocks/import-init', [StockController::class, 'importInit'])->name('stocks.import-init');
-    Route::get('/stocks/export',       [StockController::class, 'export'])->name('stocks.export');
+    Route::prefix('stocks')->name('stocks.')->group(function () {
+        Route::get('/',           [StockController::class, 'index'])->name('index');
+        Route::post('/update',    [StockController::class, 'update'])->name('update');
+        Route::get('/export',     [StockController::class, 'export'])->name('export');
+        Route::get('/sync-status', [StockController::class, 'syncStatus'])->name('sync-status');
+        // conserver si existante
+        Route::post('/import-init', [StockController::class, 'importInit'])->name('import-init');
+    });
 
-    // ── Ventes (AJAX uniquement — pas de page dédiée) ────────────────────────────
-    Route::get('/ventes', [VenteController::class, 'index'])->name('ventes.index');
-    Route::get('/ventes/dates', [VenteController::class, 'availableDates'])->name('ventes.dates');
+    // Ventes
+    Route::get('/ventes',        [VenteController::class, 'index'])->name('ventes.index');
+    Route::get('/ventes/dates',  [VenteController::class, 'availableDates'])->name('ventes.dates');
 });
 
 require __DIR__ . '/settings.php';
