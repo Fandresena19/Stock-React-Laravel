@@ -40,11 +40,13 @@ function buildExportUrl(
     search: string,
     fournisseur: string,
     maxQte: string,
+    minQte: string,
 ): string {
     const params = new URLSearchParams();
     if (search) params.set('search', search);
     if (fournisseur) params.set('fournisseur', fournisseur);
     if (maxQte) params.set('max_qte', maxQte);
+    if (minQte) params.set('min_qte', minQte);
     const qs = params.toString();
     return qs ? `${base}?${qs}` : base;
 }
@@ -97,6 +99,7 @@ export default function Index({
     const [search, setSearch] = useState(filters?.search ?? '');
     const [fournisseur, setFournisseur] = useState(filters?.fournisseur ?? '');
     const [maxQte, setMaxQte] = useState(filters?.max_qte ?? '');
+    const [minQte, setMinQte] = useState(filters?.min_qte ?? '');
     const [sortBy, setSortBy] = useState(filters?.sort_by ?? 'Code');
     const [editingCode, setEditingCode] = useState<string | null>(null);
     const [editQte, setEditQte] = useState('');
@@ -113,8 +116,9 @@ export default function Index({
             search,
             fournisseur,
             max_qte: maxQte,
+            min_qte: minQte,
             sort_by: sortBy,
-            ...o, // les overrides écrasent l'état précédent
+            ...o,
         };
         // Nettoyer les paramètres vides pour une URL propre
         Object.keys(params).forEach((k) => {
@@ -183,6 +187,7 @@ export default function Index({
             search,
             fournisseur,
             maxQte,
+            minQte,
         );
     };
 
@@ -190,7 +195,7 @@ export default function Index({
     const links = Array.isArray(stocks?.links) ? stocks.links : [];
 
     // FIX : le filtre quantité est toujours visible (plus conditionnel au fournisseur)
-    const hasFilters = !!(search || fournisseur || maxQte);
+    const hasFilters = !!(search || fournisseur || maxQte || minQte);
 
     return (
         <AppLayout>
@@ -343,11 +348,13 @@ export default function Index({
                                     setSearch('');
                                     setFournisseur('');
                                     setMaxQte('');
+                                    setMinQte('');
                                     setSortBy('Code');
                                     apply({
                                         search: '',
                                         fournisseur: '',
                                         max_qte: '',
+                                        min_qte: '',
                                         sort_by: 'Code',
                                     });
                                 }}
@@ -388,24 +395,48 @@ export default function Index({
                                     : 'border-gray-200 focus:ring-[#7a1a2e]/20 dark:border-gray-600'
                             }`}
                         />
+                        <div className="h-4 w-px bg-gray-200 dark:bg-gray-600" />
+                        <label className="text-sm text-gray-500 dark:text-gray-400">
+                            Qté supérieure à
+                        </label>
+                        <input
+                            type="number"
+                            min="0"
+                            value={minQte}
+                            onChange={(e) => {
+                                setMinQte(e.target.value);
+                                apply({ min_qte: e.target.value });
+                            }}
+                            placeholder="ex: 100"
+                            className={`w-28 rounded-lg border px-3 py-1.5 text-sm focus:ring-2 focus:outline-none dark:bg-gray-700 dark:text-white ${
+                                minQte
+                                    ? 'border-[#7a1a2e]/50 focus:ring-[#7a1a2e]/30'
+                                    : 'border-gray-200 focus:ring-[#7a1a2e]/20 dark:border-gray-600'
+                            }`}
+                        />
                         {/* Contexte actif : montre avec quoi on combine */}
-                        {maxQte && (
+                        {(maxQte || minQte) && (
                             <span className="ml-1 text-xs text-[#7a1a2e] dark:text-red-400">
+                                {maxQte && minQte
+                                    ? `→ qté entre ${minQte} et ${maxQte}`
+                                    : maxQte
+                                      ? `→ qté < ${maxQte}`
+                                      : `→ qté > ${minQte}`}
                                 {fournisseur
-                                    ? `→ fournisseur « ${fournisseur} » avec qté < ${maxQte}`
-                                    : search
-                                      ? `→ recherche « ${search} » avec qté < ${maxQte}`
-                                      : `→ tous les articles avec qté < ${maxQte}`}
+                                    ? ` · fournisseur « ${fournisseur} »`
+                                    : ''}
+                                {search ? ` · « ${search} »` : ''}
                             </span>
                         )}
-                        {maxQte && (
+                        {(maxQte || minQte) && (
                             <button
                                 onClick={() => {
                                     setMaxQte('');
-                                    apply({ max_qte: '' });
+                                    setMinQte('');
+                                    apply({ max_qte: '', min_qte: '' });
                                 }}
                                 className="ml-auto text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                                title="Effacer le filtre quantité"
+                                title="Effacer les filtres quantité"
                             >
                                 ✕
                             </button>

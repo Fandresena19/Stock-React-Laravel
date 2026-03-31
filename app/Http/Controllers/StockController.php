@@ -27,6 +27,7 @@ class StockController extends Controller
         $search      = $request->input('search', '');
         $fournisseur = $request->input('fournisseur', '');
         $maxQte      = $request->input('max_qte', '');
+        $minQte      = $request->input('min_qte', '');
         $sortBy      = in_array($request->input('sort_by'), self::SORT_ALLOWED)
             ? $request->input('sort_by')
             : 'Code';
@@ -51,6 +52,10 @@ class StockController extends Controller
                 $maxQte !== '',
                 fn($q) => $q->where('QuantiteStock', '<', (float) $maxQte)
             )
+            ->when(
+                $minQte !== '',
+                fn($q) => $q->where('QuantiteStock', '>', (float) $minQte)
+            )
             // Tri principal croissant + tri secondaire stable par Code
             ->orderBy($sortBy, 'asc')
             ->when(
@@ -74,7 +79,7 @@ class StockController extends Controller
             'stocks'           => $stocks,
             'fournisseursList' => $fournisseursList,
             'stats'            => $stats,
-            'filters'          => compact('search', 'fournisseur') + ['max_qte' => $maxQte, 'sort_by' => $sortBy],
+            'filters'          => compact('search', 'fournisseur') + ['max_qte' => $maxQte, 'min_qte' => $minQte, 'sort_by' => $sortBy],
             'sync_en_cours'    => !Cache::get('sync_done_' . $hier),
         ]);
     }

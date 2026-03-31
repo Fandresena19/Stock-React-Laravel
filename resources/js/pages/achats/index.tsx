@@ -69,25 +69,38 @@ export default function Index({ achats, stats, filters, watchFolder }: any) {
     const submitImport = (e: any) => {
         e.preventDefault();
         if (!importFiles.length) return;
+
+        // Lire le token depuis le cookie XSRF-TOKEN (standard Laravel/Inertia)
+        const csrf = decodeURIComponent(
+            document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] ?? '',
+        );
+
         const fd = new FormData();
         importFiles.forEach((f) => fd.append('files[]', f));
         if (importDate) fd.append('date', importDate);
-        fd.append(
-            '_token',
-            (
-                document.querySelector(
-                    'meta[name="csrf-token"]',
-                ) as HTMLMetaElement
-            )?.content ?? '',
-        );
-        fetch(route('achats.import'), { method: 'POST', body: fd }).finally(
-            () => {
+
+        fetch(route('achats.import'), {
+            method: 'POST',
+            headers: {
+                'X-XSRF-TOKEN': csrf,
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: fd,
+        })
+            .then(async (res) => {
+                const json = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    alert(json.message ?? `Erreur ${res.status}`);
+                }
+            })
+            .catch(() => alert('Erreur réseau — réessayez.'))
+            .finally(() => {
                 setOpenImport(false);
                 setImportFiles([]);
                 setImportDate('');
                 router.reload();
-            },
-        );
+            });
     };
 
     const rows = Array.isArray(achats?.data) ? achats.data : [];
@@ -117,12 +130,12 @@ export default function Index({ achats, stats, filters, watchFolder }: any) {
                     {[
                         { label: 'Lignes', value: fmt(stats?.total_lignes) },
                         {
-                            label: 'Montant total',
-                            value: `${fmt(stats?.total_montant)} Ar`,
+                            label: 'Qté achat hier',
+                            value: fmt(stats?.qte_hier),
                         },
                         {
                             label: 'Dernière date',
-                            value: stats?.derniere_date ?? '—',
+                            value: stats?.derniere_date ?? '_',
                         },
                         { label: 'Fichiers', value: fmt(stats?.fichiers) },
                     ].map((s) => (
