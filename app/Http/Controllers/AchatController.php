@@ -80,7 +80,7 @@ class AchatController extends Controller
             'total_montant' => Achat::selectRaw('ROUND(SUM(PrixU * QuantiteAchat), 2) as total')->value('total') ?? 0,
             'derniere_date' => Achat::max('date'),
             'fichiers'      => ImportedFile::count(),
-            'qte_hier'      => Achat::whereDate('date', Carbon::yesterday()->format('Y-m-d'))
+            'qte_hier' => Achat::where('date', Carbon::yesterday()->format('Y-m-d'))
                 ->sum('QuantiteAchat'),
         ];
 

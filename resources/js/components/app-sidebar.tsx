@@ -9,6 +9,7 @@ import {
     Warehouse,
     Sun,
     Moon,
+    ClipboardList,
 } from 'lucide-react';
 import AppLogoIcon from '@/components/app-logo-icon';
 import { NavFooter } from '@/components/nav-footer';
@@ -43,6 +44,7 @@ export function AppSidebar({ onVentesClick }: AppSidebarProps) {
         { title: 'Ventes', href: '/ventes', icon: Receipt, modal: true },
         { title: 'Stocks', href: '/stocks', icon: Warehouse },
         { title: 'Fournisseurs', href: '/fournisseurs', icon: UsersRound },
+        { title: 'Inventaire', href: '/inventaire', icon: ClipboardList },
     ];
 
     const isActive = (href: string) =>
