@@ -12,7 +12,7 @@ class Stocks extends Model
     protected $keyType    = 'string';
     public    $timestamps = false;
 
-    // Noms EXACTS des colonnes MySQL (sensible à la casse sur Windows Server)
+    // Noms EXACTS des colonnes MySQL dans la table 'stocks'
     protected $fillable = [
         'Code',
         'Liblong',
