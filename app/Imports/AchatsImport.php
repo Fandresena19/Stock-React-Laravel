@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\DB;
  *   → $this->insertedRows[] mémorise chaque ligne insérée
  *   → getInsertedRows() expose ces lignes à AchatController
  *   → AchatController appelle VenteStockService::ajusterStockBulkAvecPrix()
- * Toute la logique de déduplication SHA-256 est INCHANGÉE.
+ * Toute la logique de déduplication SHA-256 
  */
 class AchatsImport implements ToCollection, WithChunkReading
 {
