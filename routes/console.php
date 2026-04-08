@@ -18,6 +18,7 @@ Artisan::command('inspire', function () {
 //   Répétition : toutes les 1 minute
 // ─────────────────────────────────────────────────────────────────────────────
 Schedule::command('import:achat-auto')
-    ->dailyAt('06:00')
+    ->dailyAt('10:50')
+    // ->everyMinute()
     ->withoutOverlapping()
     ->runInBackground();

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ArticleController;
 use App\Http\Controllers\FournisseurController;
 use App\Http\Controllers\AchatController;
@@ -15,7 +16,7 @@ Route::inertia('/', 'welcome', [
 ])->name('home');
 
 Route::middleware(['auth', 'verified'])->group(function () {
-    Route::inertia('dashboard', 'dashboard')->name('dashboard');
+    Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
     Route::resource('articles', ArticleController::class);
 
@@ -32,6 +33,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // ── Stocks ────────────────────────────────────────────────────────────────────
     Route::get('/stocks', [StockController::class, 'index'])->name('stocks.index');
     Route::post('/stocks/update', [StockController::class, 'update'])->name('stocks.update');
+    Route::get('/stocks/export', [StockController::class, 'export'])->name('stocks.export');
 
     // ── Ventes (AJAX uniquement — pas de page dédiée) ────────────────────────────
     Route::get('/ventes', [VenteController::class, 'index'])->name('ventes.index');
