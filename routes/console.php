@@ -14,8 +14,8 @@ Artisan::command('inspire', function () {
 //
 // Pour activer, configurer UNE SEULE fois dans Windows Task Scheduler :
 //   Programme : C:\wamp64\bin\php\php8.2.13\php.exe
-//   Arguments : C:\wamp64\www\StockN2\artisan schedule:run
-//   Répétition : toutes les 1 minute
+//   Arguments : C:\wamp64\www\StockN2\artisan schedule:work
+//   Répétition : toutes les 1 minute (->everyMinute())
 // ─────────────────────────────────────────────────────────────────────────────
 Schedule::command('import:achat-auto')
     ->dailyAt('10:50')
